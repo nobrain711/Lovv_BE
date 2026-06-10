@@ -11,6 +11,14 @@ infra/data-stack/rds/schema.sql
 infra/data-stack/rds/reference_queries.sql
 ```
 
+Related schema contracts:
+
+```text
+docs/SPEC/db_build_spec.md
+docs/SPEC/service_api_schema_extension_spec.md
+docs/PLAN/service_api_schema_extension_plan.md
+```
+
 주석 정책:
 
 - CloudFormation YAML과 SQL 파일에는 한국어 주석을 함께 둔다.
@@ -41,3 +49,5 @@ reports/data_stack_build_report.md
 SAM developers and agents should read the report section `SAM Integration Notes` before adding Lambda `VpcConfig`, database environment variables, Secrets Manager permissions, DynamoDB permissions, or S3 image-bucket permissions.
 
 For VPC access patterns, read the report section `VPC Connection Guide`.
+
+For Auth, Preference, Saved Plans, and Reaction APIs, read `docs/SPEC/service_api_schema_extension_spec.md` before changing RDS tables, DynamoDB auth sessions, or service reference queries.

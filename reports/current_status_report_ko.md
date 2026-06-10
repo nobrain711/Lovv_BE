@@ -23,7 +23,9 @@ Lovv 백엔드 저장소에는 AWS SAM 애플리케이션 스택과 분리된 st
 
 - `docs/PRD/db_build_prd.md`
 - `docs/SPEC/db_build_spec.md`
+- `docs/SPEC/service_api_schema_extension_spec.md`
 - `docs/PLAN/db_build_plan.md`
+- `docs/PLAN/service_api_schema_extension_plan.md`
 
 인프라:
 
@@ -52,27 +54,30 @@ CloudFormation 템플릿은 현재 다음 리소스를 정의한다.
 - RDS DB subnet group
 - RDS MySQL DB instance
 - RDS managed master user secret
-- DynamoDB 테이블 7개
+- DynamoDB 테이블 8개
 - DynamoDB TTL 및 GSI 설정
 - S3 이미지 버킷
 - RDS, network, DynamoDB, S3 식별자를 위한 SSM parameters
 
-RDS SQL은 현재 다음 5개 테이블을 정의한다.
+RDS SQL은 현재 다음 6개 테이블을 정의한다.
 
 - `users`
 - `social_accounts`
+- `user_preferences`
 - `itineraries`
 - `itinerary_items`
 - `plan_reactions`
 
-nullable 표시 필드 조정 대상:
+서비스 API 스키마 보강 대상:
 
-- `users.display_name`
-- `itineraries.title`
-- `itineraries.duration_label`
-- `itinerary_items.place_name`
+- Auth 프로필 및 계정 상태: `users`, `social_accounts`
+- 온보딩 및 마이페이지 취향: `user_preferences`
+- 저장 일정 idempotency 및 snapshot: `itineraries`
+- 1박 2일 이상 지도 연동 일정 항목: `itinerary_items`
+- 좋아요/싫어요 toggle 유일성: `plan_reactions`
+- refresh token 세션: DynamoDB `auth_sessions`
 
-위 필드는 provider, 사용자 입력, Agent 생성 결과에서 항상 보장되지 않을 수 있으므로 DB 제약은 `NULL` 허용 방향으로 맞춘다.
+위 보강은 PR #1 Data Stack 기반 위에 Auth, Preference, Saved Plans, Reaction API 흐름을 붙이기 위한 후속 확장이다.
 
 # 4. 배포 상태
 
@@ -83,9 +88,10 @@ nullable 표시 필드 조정 대상:
 - CloudFormation stack 실제 배포 결과
 - AWS 리소스 live validation
 - RDS schema 실제 적용 여부
-- nullable 필드 변경 후 기존 RDS 테이블 상태
+- 서비스 API 스키마 확장 후 기존 RDS 테이블 상태
+- 서비스 API 확장 제약 추가 전 기존 RDS 중복 데이터 상태
 
-만약 nullable 필드 수정 전에 테이블을 이미 생성했다면, 실제 DB에는 별도 `ALTER TABLE` 마이그레이션 또는 통제된 테이블 재생성이 필요하다.
+만약 서비스 API 확장 전에 테이블을 이미 생성했다면, 실제 DB에는 통제된 `ALTER TABLE` 마이그레이션과 unique constraint 추가 전 중복 데이터 점검이 필요하다.
 
 # 5. SAM 연동 상태
 
@@ -146,8 +152,9 @@ SAM local:
 3. SSM parameters가 생성되었는지 확인한다.
 4. Secrets Manager에서 RDS secret 값을 확인한다.
 5. private RDS에 접근 가능한 환경에서 `infra/data-stack/rds/schema.sql`을 적용한다.
-6. nullable 필드 수정 전 schema가 이미 적용되었다면 `ALTER TABLE` 마이그레이션을 수행한다.
+6. 기존 schema가 이미 적용되었다면 service API 확장 마이그레이션과 unique constraint 추가 전 중복 점검을 수행한다.
 7. SAM template에 `VpcConfig`, DB 환경변수, Secrets Manager 권한, DynamoDB 권한, S3 권한을 추가한다.
+8. 갱신된 Data Stack 배포 후 Auth API가 `/lovv/dev/ddb/auth_sessions`를 참조하도록 연결한다.
 
 # 9. 검증 미실행 항목
 
@@ -174,3 +181,4 @@ SAM local:
 - `lovv_admin`, `lovv_dev`처럼 underscore가 포함된 값은 CloudFormation template validation을 통과하더라도 실제 RDS 생성 단계에서 실패할 수 있으므로 사용하지 않는다.
 - private subnet에 연결된 SAM Lambda가 Secrets Manager, SSM, DynamoDB, S3에 접근할 수 있도록 Data Stack에 VPC Endpoint를 추가한다.
 - 일반 인터넷 egress는 여전히 제공하지 않는다. 외부 API 호출이 필요하면 NAT Gateway, egress proxy, 또는 VPC 밖 Lambda 설계를 별도로 검토한다.
+- Auth, Preference, Saved Plans, Reaction API 흐름을 위한 서비스 API 스키마 확장 산출물을 추가했다.

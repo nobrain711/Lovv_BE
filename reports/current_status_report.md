@@ -23,7 +23,9 @@ Documentation:
 
 - `docs/PRD/db_build_prd.md`
 - `docs/SPEC/db_build_spec.md`
+- `docs/SPEC/service_api_schema_extension_spec.md`
 - `docs/PLAN/db_build_plan.md`
+- `docs/PLAN/service_api_schema_extension_plan.md`
 
 Infrastructure:
 
@@ -50,7 +52,7 @@ CloudFormation currently defines:
 - VPC Endpoints for Secrets Manager, SSM, DynamoDB, and S3.
 - RDS DB subnet group.
 - RDS MySQL DB instance with managed master user secret.
-- Seven DynamoDB tables with required TTL/GSI configuration.
+- Eight DynamoDB tables with required TTL/GSI configuration, including `auth_sessions`.
 - S3 image bucket with public access blocked, encryption, versioning, and `tmp/` lifecycle expiration.
 - SSM parameters for RDS, network, DynamoDB, and S3 identifiers.
 
@@ -58,16 +60,19 @@ RDS SQL currently defines:
 
 - `users`
 - `social_accounts`
+- `user_preferences`
 - `itineraries`
 - `itinerary_items`
 - `plan_reactions`
 
-Nullable display-field adjustment has been applied to:
+Service API schema reinforcement has been applied for:
 
-- `users.display_name`
-- `itineraries.title`
-- `itineraries.duration_label`
-- `itinerary_items.place_name`
+- Auth profile/account state: `users`, `social_accounts`
+- Onboarding and my-page preferences: `user_preferences`
+- Saved-plan idempotency and snapshots: `itineraries`
+- Multi-day map-ready plan items: `itinerary_items`
+- Like/dislike toggle uniqueness: `plan_reactions`
+- Refresh-token sessions: DynamoDB `auth_sessions`
 
 # 4. Deployment Status
 
@@ -78,9 +83,10 @@ Not confirmed in this repository session:
 - CloudFormation stack deployment result.
 - Live AWS resource validation.
 - Live RDS schema application.
-- Existing RDS table state after nullable-field changes.
+- Existing RDS table state after service API schema extension.
+- Existing RDS table state before service API extension constraints.
 
-If tables were already created before the nullable-field correction, the live database needs `ALTER TABLE` statements or a controlled rebuild to match the latest `schema.sql`.
+If tables were already created before the schema extension, the live database needs controlled `ALTER TABLE` migration steps and duplicate checks before adding unique constraints.
 
 # 5. SAM Integration Status
 
@@ -120,8 +126,9 @@ Recommended next operational steps:
 3. Confirm SSM parameters exist.
 4. Retrieve the RDS secret from Secrets Manager.
 5. Apply `infra/data-stack/rds/schema.sql` from a network path that can reach private RDS.
-6. If the old schema was already applied, run a migration for nullable display columns.
+6. If the old schema was already applied, run a controlled service API extension migration and duplicate checks before unique constraints.
 7. Add SAM-side `VpcConfig`, DB env vars, Secrets Manager permission, DynamoDB permissions, and S3 permissions.
+8. Wire Auth APIs to `/lovv/dev/ddb/auth_sessions` after the updated Data Stack is deployed.
 
 # 8. Validation Not Run
 
@@ -140,3 +147,4 @@ Reason:
 - The previous `lovv_dev` form can pass CloudFormation template validation but may fail during actual RDS creation because the initial DB name should use letters and numbers only.
 - The Data Stack now provisions private AWS service access through VPC Endpoints for Secrets Manager, SSM, DynamoDB, and S3.
 - General internet egress is still out of scope unless NAT Gateway or another egress path is added later.
+- Service API schema extension artifacts have been added for Auth, Preference, Saved Plans, and Reaction flows.

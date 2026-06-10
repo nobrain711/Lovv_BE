@@ -4,6 +4,7 @@
 > Created: 2026-06-10
 > Source PRD: `docs/PRD/db_build_prd.md`
 > Source Spec: `docs/SPEC/db_build_spec.md`
+> Service API Extension Spec: `docs/SPEC/service_api_schema_extension_spec.md`
 > Source Plan: `docs/PLAN/db_build_plan.md`
 > Implementation path: `infra/data-stack/`
 
@@ -14,8 +15,8 @@ This report records the current Data Stack implementation artifacts and the deve
 Included:
 
 - RDS MySQL 8-compatible DB instance provisioning.
-- RDS schema SQL for the five v0.1 MySQL tables.
-- DynamoDB table, GSI, and TTL provisioning.
+- RDS schema SQL for the PR #1 tables plus service API extensions.
+- DynamoDB table, GSI, and TTL provisioning, including refresh-token auth sessions.
 - S3 image bucket provisioning.
 - SSM parameters and CloudFormation outputs for SAM integration.
 
@@ -53,6 +54,13 @@ Reference queries:
 
 ```text
 infra/data-stack/rds/reference_queries.sql
+```
+
+Service API schema extension:
+
+```text
+docs/SPEC/service_api_schema_extension_spec.md
+docs/PLAN/service_api_schema_extension_plan.md
 ```
 
 # 3. Development Environment Defaults
@@ -136,6 +144,7 @@ The stack publishes these SSM parameters for development:
 /lovv/dev/ddb/api_logs
 /lovv/dev/ddb/content_documents
 /lovv/dev/ddb/visitor_statistics
+/lovv/dev/ddb/auth_sessions
 /lovv/dev/s3/image_bucket
 ```
 
@@ -196,6 +205,7 @@ SAM should read these values from SSM Parameter Store or receive them as deploym
 /lovv/dev/ddb/api_logs
 /lovv/dev/ddb/content_documents
 /lovv/dev/ddb/visitor_statistics
+/lovv/dev/ddb/auth_sessions
 /lovv/dev/s3/image_bucket
 ```
 
@@ -250,7 +260,7 @@ SAM Lambda IAM policies should allow only the required actions on the tables and
 
 Required DynamoDB access should be scoped by Lambda role:
 
-- Auth Lambda: user/session or auth-related log tables only.
+- Auth Lambda: `auth_sessions`, user/session event logs, and auth-related log tables only.
 - Map Lambda: content, visitor statistics, image bucket, saved itinerary API needs.
 - AgentCore Lambda: agent runs, event logs, verify cache, async jobs, API logs, content documents, visitor statistics.
 
@@ -478,6 +488,7 @@ aws ssm get-parameter --name /lovv/dev/ddb/async_jobs
 aws ssm get-parameter --name /lovv/dev/ddb/api_logs
 aws ssm get-parameter --name /lovv/dev/ddb/content_documents
 aws ssm get-parameter --name /lovv/dev/ddb/visitor_statistics
+aws ssm get-parameter --name /lovv/dev/ddb/auth_sessions
 ```
 
 ## 12.3 RDS Schema
@@ -486,6 +497,7 @@ aws ssm get-parameter --name /lovv/dev/ddb/visitor_statistics
 SHOW TABLES;
 SHOW CREATE TABLE users;
 SHOW CREATE TABLE social_accounts;
+SHOW CREATE TABLE user_preferences;
 SHOW CREATE TABLE itineraries;
 SHOW CREATE TABLE itinerary_items;
 SHOW CREATE TABLE plan_reactions;
@@ -493,12 +505,14 @@ SHOW CREATE TABLE plan_reactions;
 
 Expected:
 
-- Five tables exist.
+- Six service-ledger tables exist.
 - All tables use `InnoDB`.
 - Charset is `utf8mb4`.
 - Collation is `utf8mb4_0900_ai_ci`.
 - Foreign keys use `ON DELETE CASCADE ON UPDATE CASCADE`.
-- Indexes match `docs/SPEC/db_build_spec.md`.
+- Indexes match `docs/SPEC/db_build_spec.md` and `docs/SPEC/service_api_schema_extension_spec.md`.
+- `plan_reactions` enforces one row per `user_id + itinerary_id`.
+- `itinerary_items` orders multi-day plans by `itinerary_id + day_index + sort_order`.
 
 ## 12.4 DynamoDB
 
@@ -510,18 +524,22 @@ aws dynamodb describe-table --table-name lovv_dev_async_jobs
 aws dynamodb describe-table --table-name lovv_dev_api_logs
 aws dynamodb describe-table --table-name lovv_dev_content_documents
 aws dynamodb describe-table --table-name lovv_dev_visitor_statistics
+aws dynamodb describe-table --table-name lovv_dev_auth_sessions
 aws dynamodb describe-time-to-live --table-name lovv_dev_user_event_logs
 aws dynamodb describe-time-to-live --table-name lovv_dev_agent_runs
 aws dynamodb describe-time-to-live --table-name lovv_dev_festival_verify_cache
 aws dynamodb describe-time-to-live --table-name lovv_dev_async_jobs
 aws dynamodb describe-time-to-live --table-name lovv_dev_api_logs
+aws dynamodb describe-time-to-live --table-name lovv_dev_auth_sessions
 ```
 
 Expected:
 
-- All seven tables exist.
-- All tables use `pk` and `sk`.
+- All eight tables exist.
+- PR #1 log/cache/content/statistics tables use `pk` and `sk`.
+- `auth_sessions` uses `sessionId` as PK and `GSI1RefreshTokenHashLookup` on `refreshTokenHash`.
 - Log/cache/job/API tables have TTL enabled on `expires_at`.
+- `auth_sessions` has TTL enabled on `expiresAt`.
 - `content_documents` and `visitor_statistics` do not have TTL.
 - GSIs match the Spec.
 
@@ -556,6 +574,7 @@ RDS, DynamoDB, and S3 resources use retention-oriented policies, so manual clean
 
 - RDS, DynamoDB, and S3 resources use retention-oriented policies so stack lifecycle changes do not casually remove stateful data.
 - RDS table creation is a separate schema application step because basic CloudFormation provisions the DB instance but does not execute MySQL DDL.
-- `plan_reactions` intentionally follows the PRD and does not add `UNIQUE(user_id, itinerary_id)`. Add that only if product policy requires one active reaction per user per itinerary.
+- The service API extension adds `user_preferences`, `auth_sessions`, saved-plan idempotency fields, multi-day item ordering, and `UNIQUE(user_id, itinerary_id)` for reaction toggles.
 - DynamoDB TTL retention windows depend on application writes setting correct `expires_at` values.
+- `auth_sessions` TTL uses `expiresAt`, matching the Auth API token-session contract.
 - SAM should use SSM parameters and must not hardcode environment-prefixed physical table or bucket names.

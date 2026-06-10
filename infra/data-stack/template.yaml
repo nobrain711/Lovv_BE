@@ -535,6 +535,39 @@ Resources:
         - Key: Environment
           Value: !Ref EnvName
 
+  # Auth refresh token 세션 테이블: sessionId 기준 세션과 refresh token hash 조회를 지원한다.
+  AuthSessionsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: !Sub lovv_${EnvName}_auth_sessions
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: sessionId
+          AttributeType: S
+        - AttributeName: refreshTokenHash
+          AttributeType: S
+      KeySchema:
+        - AttributeName: sessionId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        # Auth session TTL은 애플리케이션이 기록하는 expiresAt epoch seconds 값이다.
+        AttributeName: expiresAt
+        Enabled: true
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1RefreshTokenHashLookup
+          KeySchema:
+            - AttributeName: refreshTokenHash
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      Tags:
+        - Key: Project
+          Value: Lovv
+        - Key: Environment
+          Value: !Ref EnvName
+
   # 이미지 버킷: avatar/content/tmp prefix를 사용하며 직접 public access는 차단한다.
   ImageBucket:
     Type: AWS::S3::Bucket
@@ -682,6 +715,13 @@ Resources:
       Type: String
       Value: !Ref VisitorStatisticsTable
 
+  AuthSessionsTableParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /lovv/${EnvName}/ddb/auth_sessions
+      Type: String
+      Value: !Ref AuthSessionsTable
+
   ImageBucketParameter:
     Type: AWS::SSM::Parameter
     Properties:
@@ -732,3 +772,5 @@ Outputs:
     Value: !Ref ContentDocumentsTable
   VisitorStatisticsTableName:
     Value: !Ref VisitorStatisticsTable
+  AuthSessionsTableName:
+    Value: !Ref AuthSessionsTable
