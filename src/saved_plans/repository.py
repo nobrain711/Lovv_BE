@@ -53,7 +53,7 @@ class RdsDataSavedPlanRepository:
         rows = self.rds.fetch_all(
             f"""
             SELECT id, source_recommendation_id, title, summary, destination_json, trip_type, duration_label,
-                   themes_json, is_liked, saved_at, updated_at
+                   themes_json, itinerary_json, is_liked, saved_at, updated_at
             FROM {self.table_name}
             WHERE user_id = :user_id
             ORDER BY saved_at DESC
@@ -177,7 +177,7 @@ def _build_plan(plan_id, user_id, payload, snapshot_hash, now):
         "themes": payload.get("themes") or [],
         "conditionsSnapshot": payload.get("conditionsSnapshot") or {},
         "requestSummary": payload.get("requestSummary"),
-        "itinerary": payload.get("itinerary") or {},
+        "itinerary": _itinerary_with_entry_aliases(payload.get("itinerary") or {}),
         "alternativeItinerary": payload.get("alternativeItinerary"),
         "isLiked": False,
         "savedAt": now,
@@ -195,6 +195,7 @@ def _summary(plan):
         "tripType": plan.get("tripType"),
         "durationLabel": plan.get("durationLabel"),
         "themes": plan.get("themes") or [],
+        "itinerary": _itinerary_with_entry_aliases(plan.get("itinerary") or {}),
         "isLiked": bool(plan.get("isLiked")),
         "savedAt": plan.get("savedAt"),
         "updatedAt": plan.get("updatedAt"),
@@ -245,9 +246,37 @@ def _plan_from_row(row):
         "themes": json_loads(row.get("themes_json"), []),
         "conditionsSnapshot": json_loads(row.get("conditions_snapshot_json"), {}),
         "requestSummary": row.get("request_summary"),
-        "itinerary": json_loads(row.get("itinerary_json"), {}),
+        "itinerary": _itinerary_with_entry_aliases(json_loads(row.get("itinerary_json"), {})),
         "alternativeItinerary": json_loads(row.get("alternative_itinerary_json"), None),
         "isLiked": bool(row.get("is_liked")),
         "savedAt": row.get("saved_at"),
         "updatedAt": row.get("updated_at"),
     }
+
+
+def _itinerary_with_entry_aliases(itinerary):
+    if not isinstance(itinerary, dict):
+        return {}
+
+    days = itinerary.get("days")
+    if not isinstance(days, list):
+        return dict(itinerary)
+
+    normalized_days = []
+    for day in days:
+        if not isinstance(day, dict):
+            normalized_days.append(day)
+            continue
+
+        normalized_day = dict(day)
+        items = normalized_day.get("items")
+        stops = normalized_day.get("stops")
+        if "stops" not in normalized_day and isinstance(items, list):
+            normalized_day["stops"] = items
+        if "items" not in normalized_day and isinstance(stops, list):
+            normalized_day["items"] = stops
+        normalized_days.append(normalized_day)
+
+    normalized = dict(itinerary)
+    normalized["days"] = normalized_days
+    return normalized

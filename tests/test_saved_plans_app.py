@@ -101,7 +101,45 @@ class SavedPlansAppTest(unittest.TestCase):
         self.assertEqual(response["statusCode"], 200)
         self.assertEqual(len(body["items"]), 1)
         self.assertEqual(body["items"][0]["title"], "내 일정")
-        self.assertNotIn("itinerary", body["items"][0])
+        self.assertEqual(body["items"][0]["itinerary"]["days"][0]["stops"][0]["title"], "안목해변")
+
+    def test_accepts_frontend_stops_snapshot_and_returns_items_alias(self):
+        frontend_payload = save_payload(
+            idempotencyKey="frontend-stops",
+            itinerary={
+                "days": [
+                    {
+                        "day": 1,
+                        "title": "느린 산책",
+                        "stops": [
+                            {"itemId": "stop-1", "sortOrder": 1, "title": "경포호", "body": "호수 산책"}
+                        ],
+                    }
+                ]
+            },
+        )
+
+        saved = handle_request(make_event("POST", "/api/v1/me/itineraries", frontend_payload), repository=self.repository)
+        itinerary_id = json.loads(saved["body"])["itineraryId"]
+        detail = handle_request(
+            make_event(
+                "GET",
+                f"/api/v1/me/itineraries/{itinerary_id}",
+                path_parameters={"itineraryId": itinerary_id},
+            ),
+            repository=self.repository,
+        )
+        listed = handle_request(make_event("GET", "/api/v1/me/itineraries"), repository=self.repository)
+
+        detail_body = json.loads(detail["body"])
+        list_body = json.loads(listed["body"])
+        detail_day = detail_body["itinerary"]["days"][0]
+        list_day = list_body["items"][0]["itinerary"]["days"][0]
+        self.assertEqual(saved["statusCode"], 201)
+        self.assertEqual(detail_day["stops"][0]["title"], "경포호")
+        self.assertEqual(detail_day["items"][0]["title"], "경포호")
+        self.assertEqual(list_day["stops"][0]["title"], "경포호")
+        self.assertEqual(list_day["items"][0]["title"], "경포호")
 
     def test_detail_requires_plan_ownership(self):
         saved = handle_request(make_event("POST", "/api/v1/me/itineraries", save_payload()), repository=self.repository)

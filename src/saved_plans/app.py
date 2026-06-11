@@ -125,7 +125,7 @@ def _validate_save_payload(payload):
     itinerary = payload.get("itinerary")
     if not isinstance(itinerary, dict) or not isinstance(itinerary.get("days"), list) or not itinerary["days"]:
         raise SavedPlanRequestError(400, "INVALID_ITINERARY_SNAPSHOT", "itinerary days are required")
-    if not any(isinstance(day, dict) and day.get("items") for day in itinerary["days"]):
+    if not any(isinstance(day, dict) and _day_entries(day) for day in itinerary["days"]):
         raise SavedPlanRequestError(400, "INVALID_ITINERARY_SNAPSHOT", "itinerary items are required")
     return payload
 
@@ -220,6 +220,16 @@ def _event_path(event):
 
 def _non_empty_string(value):
     return isinstance(value, str) and bool(value.strip())
+
+
+def _day_entries(day):
+    items = day.get("items")
+    stops = day.get("stops")
+    if isinstance(items, list) and items:
+        return items
+    if isinstance(stops, list) and stops:
+        return stops
+    return []
 
 
 def _now_iso():
