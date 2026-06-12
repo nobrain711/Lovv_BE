@@ -6,7 +6,7 @@ Lovv용 AWS SAM 백엔드입니다.
 
 현재 구현된 백엔드 도메인은 다음과 같습니다.
 
-- Auth 소셜 로그인: `POST /api/v1/auth/google`, `POST /api/v1/auth/kakao`, `GET /api/v1/auth/me`, `GET /api/v1/auth/session`, `POST /api/v1/auth/logout`
+- Auth 소셜 로그인 / Cognito bridge: `POST /api/v1/auth/google`, `POST /api/v1/auth/kakao`, `POST /api/v1/auth/cognito/session`, `GET /api/v1/auth/me`, `GET /api/v1/auth/session`, `POST /api/v1/auth/logout`
 - 사용자 선호도: `GET /api/v1/me/preferences`, `PUT /api/v1/me/preferences`
 - 지도 / 도시: 기존 `GET /api/small-cities`, `GET /api/small-cities/{cityId}`, `GET /api/small-cities/{cityId}/places`와 `/api/v1` alias, marker projection
 - AgentCore mock: `POST /api/v1/recommendations`
@@ -46,6 +46,8 @@ infra/data-stack/rds/schema.sql
 - Google / Kakao production login은 OIDC `id_token`과 OAuth `authorization_code`를 모두 허용합니다.
 - `authorization_code` login에는 `redirectUri`가 필요합니다. Google code exchange에는 `GOOGLE_CLIENT_SECRET`도 필요하며, Kakao는 앱 설정에서 client secret을 요구할 때만 `KAKAO_CLIENT_SECRET`을 사용합니다.
 - code exchange 결과는 OIDC `id_token`을 포함해야 합니다. 백엔드는 provider ID token을 다시 검증한 뒤 Lovv session을 생성합니다.
+- `POST /api/v1/auth/cognito/session`은 API Gateway Cognito JWT authorizer가 전달한 `requestContext.authorizer.jwt.claims`를 Lovv user/session 응답으로 bridge합니다. 초기 Cognito bridge 단계에서는 role을 `R-USER`로 고정하며, Cognito group 기반 Admin/Operator/Data Provider 권한 매핑은 별도 Admin/권한 Task 범위에서 확장합니다. Cognito User Pool, Hosted UI, Google/Kakao IdP, API Gateway JWT Authorizer 리소스 생성은 별도 PoC/배포 Task 범위입니다.
+- `EnableCognitoPoC=true` 배포 파라미터를 사용할 때만 Cognito User Pool, Hosted UI domain, Google IdP, Kakao OIDC IdP, Cognito app client 리소스를 생성합니다. 기본값은 `false`라 기존 배포에 Cognito 리소스를 강제 생성하지 않습니다.
 - 기존 demo용 `POST /api/auth/login` route는 production auth로 mount하지 않습니다.
 
 ## 지도 / 도시 데이터 소스
@@ -89,6 +91,18 @@ sam deploy --guided \
   GoogleClientSecret=replace-with-google-web-client-secret \
   KakaoClientId=replace-with-kakao-oidc-client-id \
   KakaoClientSecret=replace-with-kakao-client-secret-if-enabled \
+  EnableCognitoPoC=false \
+  CognitoJwtIssuer=https://replace-with-cognito-issuer.example \
+  CognitoJwtAudience=replace-with-cognito-app-client-id \
+  CognitoUserPoolName=lovv-auth-users \
+  CognitoUserPoolClientName=lovv-web \
+  CognitoHostedUiDomainPrefix=replace-with-globally-unique-prefix \
+  CognitoCallbackUrls=http://localhost:5173/auth/callback,https://your-frontend-origin.example/auth/callback \
+  CognitoLogoutUrls=http://localhost:5173/,https://your-frontend-origin.example/ \
+  CognitoGoogleClientId=replace-with-google-oauth-client-id \
+  CognitoGoogleClientSecret=replace-with-google-oauth-client-secret \
+  CognitoKakaoClientId=replace-with-kakao-oidc-client-id \
+  CognitoKakaoClientSecret=replace-with-kakao-oidc-client-secret \
   RdsHost=replace-with-existing-lovv-data-stack-rds-host \
   RdsSecretArn=replace-with-existing-lovv-data-stack-secret-arn \
   RdsDatabaseName=lovvdev \
