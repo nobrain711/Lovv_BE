@@ -2,7 +2,8 @@ import hashlib
 import os
 import uuid
 
-from shared.rds_data import RdsDataClient, json_dumps, json_loads
+from shared.database import create_database_client
+from shared.rds_data import json_dumps, json_loads
 
 
 class IdempotencyConflictError(Exception):
@@ -11,7 +12,7 @@ class IdempotencyConflictError(Exception):
 
 class RdsDataSavedPlanRepository:
     def __init__(self, rds_client=None, table_name=None):
-        self.rds = rds_client or RdsDataClient()
+        self.rds = rds_client or create_database_client()
         self.table_name = table_name or os.environ.get("SAVED_PLANS_TABLE_NAME", "saved_plans")
 
     @classmethod

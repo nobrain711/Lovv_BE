@@ -22,16 +22,18 @@ Out of scope for this implementation:
 
 ## Storage
 
-- `users`, `social_accounts`, `preferences`, and `saved_plans`: Aurora MySQL through RDS Data API.
-- `auth_sessions`: DynamoDB table with TTL on `expiresAt`.
+- `users`, `social_accounts`, `user_preferences`, and saved-plan tables: existing Lovv Data Stack RDS MySQL through direct VPC MySQL access.
+- `auth_sessions`: existing Lovv Data Stack DynamoDB table with TTL on `expiresAt`.
 - Map/City source data: S3 raw city detail JSON under `raw/KR/details/20260609/`.
 - Attractions, festivals, and visitor statistics are not loaded into Aurora in this scope.
 
-Aurora baseline DDL:
+Existing Data Stack RDS DDL:
 
 ```text
-schema/aurora_mysql/001_product_api_tables.sql
+infra/data-stack/rds/schema.sql
 ```
+
+The current saved-plan repository still expects the `saved_plans` API table shape. The existing Data Stack `itineraries`/`itinerary_items` shape must be reconciled before saved-plan writes are considered production-ready.
 
 ## Auth Model
 
@@ -41,7 +43,9 @@ schema/aurora_mysql/001_product_api_tables.sql
 - Only the refresh token hash is stored in DynamoDB.
 - Logout revokes refresh sessions. Already-issued access JWTs remain stateless and valid until `exp` unless a future active-session authorizer check is added.
 - If logout receives no valid refresh cookie but receives a valid bearer access JWT, it attempts to revoke the JWT `sid` session.
-- Kakao production login accepts an OIDC `id_token` and validates `aud`, `iss`, and `exp` against `KAKAO_CLIENT_ID`.
+- Google and Kakao production login accept either an OIDC `id_token` or an OAuth `authorization_code`.
+- `authorization_code` login requires `redirectUri`. Google code exchange also requires `GOOGLE_CLIENT_SECRET`; Kakao uses `KAKAO_CLIENT_SECRET` only when the Kakao app setting requires it.
+- Code exchange must return an OIDC `id_token`; the backend then validates the provider ID token before creating a Lovv session.
 - The old demo `POST /api/auth/login` route is not mounted as production auth.
 
 ## Map / City Data Source
@@ -75,11 +79,23 @@ sam deploy --guided \
   --parameter-overrides \
   MapCityS3Bucket=lovv-data-pipeline-dev-925273580929 \
   MapCityS3Prefix=raw/KR/details/20260609/ \
-  AllowedCorsOrigin=https://your-frontend-origin.example \
+  AllowedCorsOrigin=http://localhost:5173,https://your-frontend-origin.example \
   AuthTokenSigningSecret=replace-with-secret-manager-or-ci-value \
+  AuthRefreshCookieSameSite=None \
+  AuthRefreshCookieSecure=true \
+  AuthRefreshCookieDomain=.your-service-domain.example \
+  AuthRefreshCookiePath=/ \
   GoogleClientId=replace-with-google-web-client-id \
+  GoogleClientSecret=replace-with-google-web-client-secret \
   KakaoClientId=replace-with-kakao-oidc-client-id \
-  AuroraClusterArn=replace-with-aurora-cluster-arn \
-  AuroraSecretArn=replace-with-secret-arn \
-  AuroraDatabaseName=lovv
+  KakaoClientSecret=replace-with-kakao-client-secret-if-enabled \
+  RdsHost=replace-with-existing-lovv-data-stack-rds-host \
+  RdsSecretArn=replace-with-existing-lovv-data-stack-secret-arn \
+  RdsDatabaseName=lovvdev \
+  VpcId=replace-with-existing-lovv-data-stack-vpc-id \
+  PrivateSubnetA=replace-with-existing-lovv-data-stack-private-subnet-a \
+  PrivateSubnetC=replace-with-existing-lovv-data-stack-private-subnet-c \
+  AuthSessionsTableName=lovv_dev_auth_sessions
 ```
+
+When auth Lambdas run inside the private Data Stack VPC, live Google/Kakao token verification and authorization-code exchange also need outbound internet egress, for example through NAT or another approved egress design.

@@ -1,0 +1,65 @@
+import unittest
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+TEMPLATE = PROJECT_ROOT / "template.yaml"
+RDS_SCHEMA = PROJECT_ROOT / "infra" / "data-stack" / "rds" / "schema.sql"
+PREFERENCES_MIGRATION = (
+    PROJECT_ROOT
+    / "infra"
+    / "data-stack"
+    / "rds"
+    / "migrations"
+    / "20260612_allow_both_country_track.sql"
+)
+
+
+class ExistingDataStackTemplateTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.template = TEMPLATE.read_text(encoding="utf-8")
+
+    def test_api_stack_uses_existing_data_stack_parameters(self):
+        for expected in (
+            "RdsHost:",
+            "RdsSecretArn:",
+            "RdsDatabaseName:",
+            "AuthSessionsTableName:",
+            "PrivateSubnetA:",
+            "PrivateSubnetC:",
+            "VpcId:",
+            "DB_ACCESS_MODE: mysql",
+            "RDS_HOST: !Ref RdsHost",
+            "RDS_SECRET_ARN: !Ref RdsSecretArn",
+            "RDS_DATABASE_NAME: !Ref RdsDatabaseName",
+            "AUTH_SESSIONS_TABLE_NAME: !Ref AuthSessionsTableName",
+            "VpcConfig:",
+        ):
+            self.assertIn(expected, self.template)
+
+    def test_api_stack_does_not_create_duplicate_auth_session_table(self):
+        self.assertNotIn("AuthSessionsTable:\n    Type: AWS::DynamoDB::Table", self.template)
+        self.assertIn("table/${AuthSessionsTableName}", self.template)
+        self.assertIn("table/${AuthSessionsTableName}/index/RefreshTokenHashIndex", self.template)
+
+    def test_protected_routes_do_not_use_gateway_authorizer_that_drops_cors_errors(self):
+        self.assertNotIn("Authorizer: LovvTokenAuthorizer", self.template)
+
+    def test_template_accepts_comma_separated_cors_origins(self):
+        self.assertIn("CORS_ALLOW_ORIGINS: !Ref AllowedCorsOrigin", self.template)
+        self.assertIn('AllowOrigins: !Split [",", !Ref AllowedCorsOrigin]', self.template)
+
+
+class ExistingDataStackSchemaTest(unittest.TestCase):
+    def test_user_preferences_country_track_allows_api_fallback(self):
+        schema = RDS_SCHEMA.read_text(encoding="utf-8")
+        migration = PREFERENCES_MIGRATION.read_text(encoding="utf-8")
+
+        self.assertIn("country_track IN ('KR', 'JP', 'BOTH')", schema)
+        self.assertIn("DROP CHECK chk_user_preferences_country", migration)
+        self.assertIn("country_track IN ('KR', 'JP', 'BOTH')", migration)
+
+
+if __name__ == "__main__":
+    unittest.main()
