@@ -2,7 +2,7 @@
   { "ParameterKey": "AllowedCorsOrigin",          "ParameterValue": "http://127.0.0.1:5173,http://localhost:5173,https://d3nuef0zacpyj.cloudfront.net" },
   { "ParameterKey": "MapCityS3Bucket",             "ParameterValue": "lovv-data-pipeline-dev-925273580929" },
   { "ParameterKey": "MapCityS3Prefix",             "ParameterValue": "raw/KR/details/20260609/" },
-  { "ParameterKey": "AuthTokenSigningSecret",      "UsePreviousValue": true },
+  { "ParameterKey": "AuthTokenSigningSecretArn",   "ParameterValue": "arn:aws:secretsmanager:us-east-1:925273580929:secret:lovv/dev/jwt-signing-secret-LufcUG" },
   { "ParameterKey": "AuthTokenTtlSeconds",         "ParameterValue": "900" },
   { "ParameterKey": "AuthRefreshTtlSeconds",       "ParameterValue": "1209600" },
   { "ParameterKey": "AuthIssuer",                  "ParameterValue": "lovv-auth" },

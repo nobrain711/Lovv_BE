@@ -4,8 +4,8 @@
   ParameterValue: "lovv-data-pipeline-dev-925273580929"
 - ParameterKey: MapCityS3Prefix
   ParameterValue: "raw/KR/details/20260609/"
-- ParameterKey: AuthTokenSigningSecret
-  UsePreviousValue: true
+- ParameterKey: AuthTokenSigningSecretArn
+  ParameterValue: "arn:aws:secretsmanager:us-east-1:925273580929:secret:lovv/dev/jwt-signing-secret-LufcUG"
 - ParameterKey: AuthTokenTtlSeconds
   ParameterValue: "900"
 - ParameterKey: AuthRefreshTtlSeconds
