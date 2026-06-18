@@ -58,7 +58,7 @@ class RdsDataUserRepository:
     def get_user(self, user_id):
         row = self.rds.fetch_one(
             f"""
-            SELECT id, email, display_name, avatar_url, birth_date, created_at, status, role
+            SELECT id, email, display_name, avatar_url, birth_date, gender, created_at, status, role
             FROM {self.users_table}
             WHERE id = :user_id AND status = 'active'
             """,
@@ -69,7 +69,7 @@ class RdsDataUserRepository:
     def _find_by_social(self, provider, provider_user_id):
         row = self.rds.fetch_one(
             f"""
-            SELECT u.id, u.email, u.display_name, u.avatar_url, u.birth_date, u.created_at, u.status, u.role
+            SELECT u.id, u.email, u.display_name, u.avatar_url, u.birth_date, u.gender, u.created_at, u.status, u.role
             FROM {self.social_accounts_table} sa
             JOIN {self.users_table} u ON u.id = sa.user_id
             WHERE sa.provider = :provider
@@ -83,7 +83,7 @@ class RdsDataUserRepository:
     def _find_by_verified_email(self, email):
         row = self.rds.fetch_one(
             f"""
-            SELECT id, email, display_name, avatar_url, birth_date, created_at, status, role
+            SELECT id, email, display_name, avatar_url, birth_date, gender, created_at, status, role
             FROM {self.users_table}
             WHERE email = :email AND status = 'active'
             """,
@@ -117,6 +117,7 @@ class RdsDataUserRepository:
             "displayName": display_name,
             "avatarUrl": identity.avatar_url,
             "birthDate": None,
+            "gender": None,
             "createdAt": now,
             "role": "user",
             "roles": ["R-USER"],
@@ -234,7 +235,7 @@ class RdsDataUserRepository:
         return [_social_account_from_row(row) for row in (rows or [])]
 
 
-_PROFILE_UPDATE_COLUMNS = {"display_name", "birth_date"}
+_PROFILE_UPDATE_COLUMNS = {"display_name", "birth_date", "gender"}
 
 
 class InMemoryUserRepository:
@@ -267,6 +268,7 @@ class InMemoryUserRepository:
                 "displayName": identity.display_name or "Lovv User",
                 "avatarUrl": identity.avatar_url,
                 "birthDate": None,
+                "gender": None,
                 "role": "user",
                 "roles": ["R-USER"],
                 "status": "active",
@@ -309,6 +311,8 @@ class InMemoryUserRepository:
             user["displayName"] = fields["display_name"]
         if "birth_date" in fields:
             user["birthDate"] = fields["birth_date"]
+        if "gender" in fields:
+            user["gender"] = fields["gender"]
         user["updatedAt"] = now or self.now
         return self.get_user(user_id)
 
@@ -372,6 +376,7 @@ def _user_from_row(row):
         "displayName": row.get("display_name") or "Lovv User",
         "avatarUrl": row.get("avatar_url"),
         "birthDate": row.get("birth_date"),
+        "gender": row.get("gender"),
         "createdAt": row.get("created_at"),
         "role": row.get("role") or "user",
         "roles": roles_for_db_role(row.get("role")),

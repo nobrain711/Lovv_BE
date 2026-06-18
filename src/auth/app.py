@@ -46,6 +46,10 @@ def lambda_handler(event, context):
             except Exception:
                 pass
             try:
+                db.execute("ALTER TABLE users ADD COLUMN gender VARCHAR(10) NULL AFTER birth_date", include_result_metadata=False)
+            except Exception:
+                pass
+            try:
                 db.execute("ALTER TABLE users ADD COLUMN status VARCHAR(30) NOT NULL DEFAULT 'active' AFTER birth_date", include_result_metadata=False)
             except Exception:
                 pass
@@ -318,6 +322,8 @@ def _handle_update_me(event, user_repository, preference_repository):
         fields["display_name"] = _parse_display_name(body.get("displayName"))
     if "birthDate" in body:
         fields["birth_date"] = _parse_birth_date(body.get("birthDate"))
+    if "gender" in body:
+        fields["gender"] = _parse_gender(body.get("gender"))
 
     if not fields:
         raise AuthRequestError(400, "INVALID_REQUEST", "No updatable fields were provided")
@@ -390,6 +396,17 @@ def _parse_birth_date(value):
         raise AuthRequestError(400, "INVALID_BIRTH_DATE", "birthDate must not be in the future")
     if parsed.year < 1900:
         raise AuthRequestError(400, "INVALID_BIRTH_DATE", "birthDate year must be 1900 or later")
+    return value
+
+
+_VALID_GENDERS = {"남", "여"}
+
+
+def _parse_gender(value):
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str) or value not in _VALID_GENDERS:
+        raise AuthRequestError(400, "INVALID_GENDER", "gender must be '남' or '여'")
     return value
 
 
@@ -630,6 +647,7 @@ def _public_user(user, is_new_user=None, provider=None):
         "email": user.get("email"),
         "avatarUrl": user.get("avatarUrl"),
         "birthDate": user.get("birthDate"),
+        "gender": user.get("gender"),
         "createdAt": user.get("createdAt"),
         "roles": user.get("roles") if "roles" in user else ["R-USER"],
     }
