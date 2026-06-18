@@ -893,6 +893,15 @@ Resources:
       Type: String
       Value: !Ref LovvPrivateSubnetC
 
+  # 선택 NAT 인스턴스 운영을 위한 public subnet 공개값이다.
+  PublicSubnetAParameter:
+    Type: AWS::SSM::Parameter
+    Condition: CreateNatInstance
+    Properties:
+      Name: !Sub /lovv/${EnvName}/network/public_subnet_a
+      Type: String
+      Value: !Ref LovvPublicSubnetA
+
   # RDS 접근 경로 확인과 보안 그룹 연동을 위한 RDS security group 공개값이다.
   RDSSecurityGroupParameter:
     Type: AWS::SSM::Parameter
@@ -908,6 +917,22 @@ Resources:
       Name: !Sub /lovv/${EnvName}/network/endpoint_security_group
       Type: String
       Value: !Ref LovvEndpointSecurityGroup
+
+  NatInstanceIdParameter:
+    Type: AWS::SSM::Parameter
+    Condition: CreateNatInstance
+    Properties:
+      Name: !Sub /lovv/${EnvName}/network/nat_instance_id
+      Type: String
+      Value: !Ref LovvNatInstance
+
+  NatInstanceSecurityGroupParameter:
+    Type: AWS::SSM::Parameter
+    Condition: CreateNatInstance
+    Properties:
+      Name: !Sub /lovv/${EnvName}/network/nat_instance_security_group
+      Type: String
+      Value: !Ref LovvNatInstanceSecurityGroup
 
   # SAM 앱이 사용할 DB 이름 공개값이다.
   RDSDatabaseNameParameter:
@@ -1014,12 +1039,24 @@ Outputs:
   PrivateSubnetC:
     Description: Development private subnet C ID.
     Value: !Ref LovvPrivateSubnetC
+  PublicSubnetA:
+    Condition: CreateNatInstance
+    Description: Development public subnet A ID for the optional NAT instance.
+    Value: !Ref LovvPublicSubnetA
   RDSSecurityGroup:
     Description: Development RDS security group ID.
     Value: !Ref LovvRDSSecurityGroup
   EndpointSecurityGroup:
     Description: Development interface endpoint security group ID.
     Value: !Ref LovvEndpointSecurityGroup
+  NatInstanceId:
+    Condition: CreateNatInstance
+    Description: Optional development NAT instance ID.
+    Value: !Ref LovvNatInstance
+  NatInstanceSecurityGroup:
+    Condition: CreateNatInstance
+    Description: Optional development NAT instance security group ID.
+    Value: !Ref LovvNatInstanceSecurityGroup
   RDSHost:
     Description: RDS endpoint host.
     Value: !GetAtt LovvRDSInstance.Endpoint.Address
