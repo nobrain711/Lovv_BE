@@ -537,6 +537,7 @@ Resources:
           SAVED_PLANS_TABLE_NAME: !Ref SavedPlansTableName
           ADMIN_DATA_PROPOSALS_TABLE_NAME: !Ref AdminDataProposalsTableName
           ADMIN_DATA_PROPOSAL_HISTORY_TABLE_NAME: !Ref AdminDataProposalHistoryTableName
+          MONTHLY_CURATED_DESTINATIONS_TABLE_NAME: monthly_curated_destinations
       VpcConfig:
         SecurityGroupIds:
           - !Ref AppFunctionSecurityGroup
@@ -620,6 +621,70 @@ Resources:
             ApiId: !Ref LovvHttpApi
             Method: GET
             Path: /api/v1/admin/data-proposals/{proposalId}/history
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminPromoteMonthlyDestination:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: POST
+            Path: /api/v1/admin/monthly-destinations
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminListMonthlyDestinations:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: GET
+            Path: /api/v1/admin/monthly-destinations
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminGetMonthlyDestination:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: GET
+            Path: /api/v1/admin/monthly-destinations/{destinationId}
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminScheduleMonthlyDestination:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: POST
+            Path: /api/v1/admin/monthly-destinations/{destinationId}/schedule
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminPublishMonthlyDestination:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: POST
+            Path: /api/v1/admin/monthly-destinations/{destinationId}/publish
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminHideMonthlyDestination:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: POST
+            Path: /api/v1/admin/monthly-destinations/{destinationId}/hide
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminExpireMonthlyDestination:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: POST
+            Path: /api/v1/admin/monthly-destinations/{destinationId}/expire
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminRejectMonthlyDestination:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: POST
+            Path: /api/v1/admin/monthly-destinations/{destinationId}/reject
             Auth:
               Authorizer: LovvTokenAuthorizer
 
@@ -876,6 +941,4 @@ Outputs:
     Description: Cognito Hosted UI base URL.
     Value: !Sub https://${CognitoHostedUiDomainPrefix}.auth.${AWS::Region}.amazoncognito.com
   CognitoJwtIssuer:
-    Condition: CreateCognitoPoC
-    Description: Cognito JWT issuer for API Gateway JWT authorizer.
-    Value: !Sub https://cognito-idp.${AWS::Region}.${AWS::URLSuffix}/${LovvCognitoUserPool}
+    Condition: Cr
