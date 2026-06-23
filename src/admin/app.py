@@ -10,10 +10,15 @@
 import base64
 import json
 import logging
+import re
 from datetime import datetime, timezone
 
 from admin.repository import RdsDataAdminUserRepository
 from admin.proposals_repository import ProposalTransitionError, RdsDataAdminProposalRepository
+from admin.monthly_destinations_repository import (
+    MonthlyDestinationTransitionError,
+    RdsDataMonthlyDestinationRepository,
+)
 from shared.auth import AuthTokenError
 from shared.authorization import (
     AuthorizationError,
@@ -50,17 +55,30 @@ PROPOSAL_FORBIDDEN_FIELDS = {
 }
 PROPOSAL_CONTENT_TYPES = {"attraction", "festival", "experience", "transport", "monthly_destination"}
 
+# Monthly curated destination workflow (step 11). Candidates are promoted from an
+# approved proposal; clients may never set authority/state fields (server-owned).
+MONTHLY_DESTINATION_COLLECTION_PATH = "/api/v1/admin/monthly-destinations"
+MONTHLY_ACTIONS = {"schedule", "publish", "hide", "expire", "reject"}
+MONTHLY_FORBIDDEN_FIELDS = {
+    "id", "status", "publishedBy", "published_by", "publishedAt", "published_at",
+    "hiddenBy", "hidden_by", "hiddenAt", "hidden_at", "createdBy", "created_by",
+    "roles", "role", "userId", "user_id",
+}
+CURATION_MONTH_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{2}$")
+
 
 def lambda_handler(event, context):
     return handle_request(event or {})
 
 
-def handle_request(event, repository=None, proposal_repository=None):
+def handle_request(event, repository=None, proposal_repository=None, monthly_repository=None):
     try:
-        return _handle_request(event or {}, repository, proposal_repository)
+        return _handle_request(event or {}, repository, proposal_repository, monthly_repository)
     except AdminRequestError as error:
         return error_response(error.status_code, error.code, error.message)
     except ProposalTransitionError as error:
+        return error_response(error.status_code, error.code, error.message)
+    except MonthlyDestinationTransitionError as error:
         return error_response(error.status_code, error.code, error.message)
     except AuthorizationError as error:
         return error_response(error.status_code, error.code, error.message)
@@ -71,7 +89,7 @@ def handle_request(event, repository=None, proposal_repository=None):
         return error_response(500, "INTERNAL_ERROR", "Internal server error")
 
 
-def _handle_request(event, repository, proposal_repository):
+def _handle_request(event, repository, proposal_repository, monthly_repository=None):
     method = _event_method(event)
     path = _event_path(event)
 
@@ -161,6 +179,73 @@ def _handle_request(event, repository, proposal_repository):
         if not proposal:
             raise AdminRequestError(404, "PROPOSAL_NOT_FOUND", "Data proposal was not found")
         return json_response(200, {"proposal": _public_proposal(proposal, include_detail=True)})
+
+    monthly_id = _monthly_destination_id(path)
+    monthly_action = _monthly_action(path, monthly_id)
+
+    if method == "POST" and path == MONTHLY_DESTINATION_COLLECTION_PATH:
+        # Promote an approved proposal into a monthly candidate. Admin-only; the
+        # city/region/source fields are copied from the proposal so the candidate
+        # cannot drift from the content that was actually approved.
+        principal = require_admin_access(event)
+        payload = _validate_monthly_create_payload(_json_body(event))
+        proposal_repository = proposal_repository or RdsDataAdminProposalRepository.from_env()
+        source = proposal_repository.get_visible(payload["sourceProposalId"], principal)
+        if not source:
+            raise AdminRequestError(404, "PROPOSAL_NOT_FOUND", "Source proposal was not found")
+        if source.get("status") != "approved":
+            raise AdminRequestError(409, "PROPOSAL_NOT_APPROVED", "Only approved proposals can be promoted")
+        record = _merge_promotion_payload(payload, source)
+        monthly_repository = monthly_repository or RdsDataMonthlyDestinationRepository.from_env()
+        destination = monthly_repository.create(principal, record, _now_iso())
+        return json_response(201, {"destination": _public_monthly_destination(destination)})
+
+    if method == "GET" and path == MONTHLY_DESTINATION_COLLECTION_PATH:
+        # Admin sees every region; a local operator only its assigned regions.
+        principal = require_roles(event, {ROLE_ADMIN, ROLE_LOCAL_OPERATOR})
+        monthly_repository = monthly_repository or RdsDataMonthlyDestinationRepository.from_env()
+        query = event.get("queryStringParameters") or {}
+        curation_month = _validate_curation_month(query.get("month")) if query.get("month") else None
+        status = _validate_monthly_status(query.get("status")) if query.get("status") else None
+        limit = _parse_limit(query.get("limit"))
+        if has_any_role(principal, {ROLE_ADMIN}):
+            destinations = monthly_repository.list_all(
+                curation_month=curation_month,
+                region_id=_optional_string(query.get("regionId")),
+                status=status,
+                limit=limit,
+            )
+        else:
+            destinations = monthly_repository.list_for_regions(
+                principal.get("regionIds") or [],
+                curation_month=curation_month,
+                status=status,
+                limit=limit,
+            )
+        return json_response(200, {"items": [_public_monthly_destination(item) for item in destinations], "nextCursor": None})
+
+    if method == "POST" and monthly_id and monthly_action in MONTHLY_ACTIONS:
+        # Publish-state transitions are admin-only and validated against the state
+        # machine in the repository (409 MONTHLY_TRANSITION_FORBIDDEN if illegal).
+        require_admin_access_principal = require_admin_access(event)
+        payload = _validate_monthly_action_payload(_json_body(event))
+        monthly_repository = monthly_repository or RdsDataMonthlyDestinationRepository.from_env()
+        destination = monthly_repository.transition(
+            monthly_id, monthly_action, require_admin_access_principal, _now_iso(), payload=payload
+        )
+        if not destination:
+            raise AdminRequestError(404, "MONTHLY_DESTINATION_NOT_FOUND", "Monthly destination was not found")
+        return json_response(200, {"destination": _public_monthly_destination(destination)})
+
+    if method == "GET" and monthly_id and path.endswith(f"/{monthly_id}"):
+        principal = require_roles(event, {ROLE_ADMIN, ROLE_LOCAL_OPERATOR})
+        monthly_repository = monthly_repository or RdsDataMonthlyDestinationRepository.from_env()
+        destination = monthly_repository.get(monthly_id)
+        if not destination:
+            raise AdminRequestError(404, "MONTHLY_DESTINATION_NOT_FOUND", "Monthly destination was not found")
+        if not has_any_role(principal, {ROLE_ADMIN}) and destination.get("regionId") not in set(principal.get("regionIds") or []):
+            raise AdminRequestError(404, "MONTHLY_DESTINATION_NOT_FOUND", "Monthly destination was not found")
+        return json_response(200, {"destination": _public_monthly_destination(destination)})
 
     return error_response(404, "NOT_FOUND", "Route not found")
 
@@ -282,6 +367,137 @@ def _public_proposal_history(item):
         "metadata": item.get("metadata") or {},
         "createdAt": item.get("createdAt"),
     }
+
+
+def _validate_monthly_create_payload(payload):
+    forbidden = sorted(MONTHLY_FORBIDDEN_FIELDS.intersection(payload.keys()))
+    if forbidden:
+        raise AdminRequestError(400, "INVALID_MONTHLY_PAYLOAD", "Authority fields are not writable")
+    if not _non_empty_string(payload.get("sourceProposalId")):
+        raise AdminRequestError(400, "INVALID_MONTHLY_PAYLOAD", "sourceProposalId is required")
+    curation_month = _validate_curation_month(payload.get("curationMonth"))
+    theme_codes = _validate_theme_codes(payload.get("themeCodes"))
+    return {
+        "sourceProposalId": payload.get("sourceProposalId").strip(),
+        "curationMonth": curation_month,
+        "themeCodes": theme_codes,
+        # Optional overrides; anything omitted falls back to the source proposal.
+        "cityId": _optional_string(payload.get("cityId")),
+        "cityName": _optional_string(payload.get("cityName")),
+        "regionId": _optional_string(payload.get("regionId")),
+        "officialSourceName": _optional_string(payload.get("officialSourceName")),
+        "officialSourceUrl": _optional_string(payload.get("officialSourceUrl")),
+        "sourceUpdatedAt": _optional_string(payload.get("sourceUpdatedAt")),
+        "validFrom": _optional_string(payload.get("validFrom")),
+        "validUntil": _optional_string(payload.get("validUntil")),
+    }
+
+
+def _merge_promotion_payload(payload, source):
+    # Prefer explicit overrides, else copy from the approved proposal so the
+    # candidate stays anchored to the content that was actually reviewed.
+    return {
+        "sourceProposalId": payload["sourceProposalId"],
+        "curationMonth": payload["curationMonth"],
+        "themeCodes": payload["themeCodes"],
+        "cityId": payload.get("cityId") or source.get("cityId"),
+        "cityName": payload.get("cityName") or source.get("cityName"),
+        "regionId": payload.get("regionId") or source.get("regionId"),
+        "officialSourceName": payload.get("officialSourceName") or source.get("officialSourceName"),
+        "officialSourceUrl": payload.get("officialSourceUrl") or source.get("officialSourceUrl"),
+        "sourceUpdatedAt": payload.get("sourceUpdatedAt") or source.get("sourceUpdatedAt"),
+        "validFrom": payload.get("validFrom"),
+        "validUntil": payload.get("validUntil"),
+        "serviceBoundary": source.get("serviceBoundary") or {},
+        "gatewayCity": source.get("gatewayCity") or {},
+    }
+
+
+def _validate_monthly_action_payload(payload):
+    forbidden = sorted(MONTHLY_FORBIDDEN_FIELDS.intersection(payload.keys()))
+    if forbidden:
+        raise AdminRequestError(400, "INVALID_MONTHLY_PAYLOAD", "Authority fields are not writable")
+    allowed = {"reason", "validFrom", "validUntil"}
+    unexpected = sorted(set(payload.keys()) - allowed)
+    if unexpected:
+        raise AdminRequestError(400, "INVALID_MONTHLY_PAYLOAD", "Action payload contains unsupported fields")
+    for key in ("reason", "validFrom", "validUntil"):
+        value = payload.get(key)
+        if value not in (None, "") and not isinstance(value, str):
+            raise AdminRequestError(400, "INVALID_MONTHLY_PAYLOAD", f"{key} must be a string")
+    return {
+        "reason": _optional_string(payload.get("reason")),
+        "validFrom": _optional_string(payload.get("validFrom")),
+        "validUntil": _optional_string(payload.get("validUntil")),
+    }
+
+
+def _validate_curation_month(value):
+    if not _non_empty_string(value) or not CURATION_MONTH_PATTERN.match(value.strip()):
+        raise AdminRequestError(400, "INVALID_MONTHLY_PAYLOAD", "curationMonth must be in YYYY-MM format")
+    return value.strip()
+
+
+def _validate_theme_codes(value):
+    if not isinstance(value, list) or not value:
+        raise AdminRequestError(400, "INVALID_MONTHLY_PAYLOAD", "themeCodes must be a non-empty array")
+    codes = []
+    for item in value:
+        if not _non_empty_string(item):
+            raise AdminRequestError(400, "INVALID_MONTHLY_PAYLOAD", "themeCodes must contain non-empty strings")
+        text = item.strip()
+        if text not in codes:
+            codes.append(text)
+    return codes
+
+
+def _validate_monthly_status(value):
+    statuses = {"candidate", "scheduled", "published", "hidden", "expired", "rejected"}
+    if value not in statuses:
+        raise AdminRequestError(400, "VALIDATION_ERROR", "status filter is invalid")
+    return value
+
+
+def _public_monthly_destination(destination):
+    return {
+        "id": destination.get("id"),
+        "cityId": destination.get("cityId"),
+        "cityName": destination.get("cityName"),
+        "regionId": destination.get("regionId"),
+        "sourceProposalId": destination.get("sourceProposalId"),
+        "curationMonth": destination.get("curationMonth"),
+        "themeCodes": destination.get("themeCodes") or [],
+        "officialSourceName": destination.get("officialSourceName"),
+        "officialSourceUrl": destination.get("officialSourceUrl"),
+        "sourceUpdatedAt": destination.get("sourceUpdatedAt"),
+        "validFrom": destination.get("validFrom"),
+        "validUntil": destination.get("validUntil"),
+        "status": destination.get("status"),
+        "publishReason": destination.get("publishReason"),
+        "publishedBy": destination.get("publishedBy"),
+        "publishedAt": destination.get("publishedAt"),
+        "hiddenBy": destination.get("hiddenBy"),
+        "hiddenAt": destination.get("hiddenAt"),
+        "hiddenReason": destination.get("hiddenReason"),
+        "createdAt": destination.get("createdAt"),
+        "updatedAt": destination.get("updatedAt"),
+    }
+
+
+def _monthly_destination_id(path):
+    prefix = f"{MONTHLY_DESTINATION_COLLECTION_PATH}/"
+    if path.startswith(prefix):
+        return path[len(prefix):].split("/", 1)[0] or None
+    return None
+
+
+def _monthly_action(path, destination_id):
+    if not destination_id:
+        return None
+    prefix = f"{MONTHLY_DESTINATION_COLLECTION_PATH}/{destination_id}/"
+    if not path.startswith(prefix):
+        return None
+    return path[len(prefix):].strip("/") or None
 
 
 def _json_body(event):
