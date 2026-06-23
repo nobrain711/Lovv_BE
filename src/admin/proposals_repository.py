@@ -4,10 +4,26 @@
 
 import os
 import uuid
+from hashlib import sha256
 
 from shared.authorization import ROLE_ADMIN, ROLE_LOCAL_OPERATOR, has_any_role
 from shared.database import create_database_client
 from shared.rds_data import json_dumps, json_loads
+
+
+PROPOSAL_REVIEW_ACTIONS = {
+    "in_review": {"from": {"submitted", "change_requested"}, "to": "in_review"},
+    "approved": {"from": {"in_review"}, "to": "approved"},
+    "rejected": {"from": {"submitted", "in_review", "change_requested"}, "to": "rejected"},
+}
+
+
+class ProposalTransitionError(Exception):
+    def __init__(self, status_code, code, message):
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.message = message
 
 
 class RdsDataAdminProposalRepository:
@@ -122,7 +138,89 @@ class RdsDataAdminProposalRepository:
             return None
         return proposal
 
-    def _append_history(self, proposal, action, from_status, to_status, principal, now):
+    def transition(self, proposal_id, action, principal, now, note=None):
+        proposal = self._get_existing(proposal_id)
+        if not proposal:
+            return None
+        _validate_transition(proposal, action, principal)
+
+        from_status = proposal.get("status")
+        to_status = PROPOSAL_REVIEW_ACTIONS[action]["to"]
+        approved_content_hash = _approved_content_hash(proposal) if to_status == "approved" else None
+        updated = dict(proposal)
+        updated.update(
+            {
+                "status": to_status,
+                "reviewedBy": principal.get("userId"),
+                "reviewedAt": now,
+                "reviewNote": note,
+                "approvedContentHash": approved_content_hash,
+                "updatedAt": now,
+            }
+        )
+        result = self.rds.execute(
+            f"""
+            UPDATE {self.proposals_table}
+            SET status = :status,
+                reviewed_by = :reviewed_by,
+                reviewed_at = :reviewed_at,
+                review_note = :review_note,
+                approved_content_hash = :approved_content_hash,
+                updated_at = :updated_at
+            WHERE id = :id
+              AND status = :from_status
+              AND deleted_at IS NULL
+            """,
+            {
+                "id": proposal_id,
+                "from_status": from_status,
+                "status": to_status,
+                "reviewed_by": principal.get("userId"),
+                "reviewed_at": now,
+                "review_note": note,
+                "approved_content_hash": approved_content_hash,
+                "updated_at": now,
+            },
+            include_result_metadata=False,
+        )
+        if int((result or {}).get("numberOfRecordsUpdated") or 0) != 1:
+            raise ProposalTransitionError(
+                409,
+                "INVALID_PROPOSAL_STATE",
+                "Current proposal status does not allow this review action",
+            )
+        self._append_history(updated, action, from_status, to_status, principal, now, note=note)
+        return updated
+
+    def list_history_visible(self, proposal_id, principal, limit=50):
+        proposal = self.get_visible(proposal_id, principal)
+        if not proposal:
+            return None
+        rows = self.rds.fetch_all(
+            f"""
+            SELECT *
+            FROM {self.history_table}
+            WHERE proposal_id = :proposal_id
+            ORDER BY created_at ASC
+            LIMIT :limit
+            """,
+            {"proposal_id": proposal_id, "limit": limit},
+        )
+        return [_history_from_row(row) for row in rows]
+
+    def _get_existing(self, proposal_id):
+        row = self.rds.fetch_one(
+            f"""
+            SELECT *
+            FROM {self.proposals_table}
+            WHERE id = :id
+              AND deleted_at IS NULL
+            """,
+            {"id": proposal_id},
+        )
+        return _proposal_from_row(row) if row else None
+
+    def _append_history(self, proposal, action, from_status, to_status, principal, now, note=None):
         self.rds.execute(
             f"""
             INSERT INTO {self.history_table}
@@ -140,8 +238,13 @@ class RdsDataAdminProposalRepository:
                 "to_status": to_status,
                 "actor_user_id": principal.get("userId"),
                 "actor_roles_json": json_dumps(principal.get("roles") or []),
-                "note": None,
-                "metadata_json": json_dumps({"proposalCode": proposal.get("proposalCode")}),
+                "note": note,
+                "metadata_json": json_dumps(
+                    {
+                        "proposalCode": proposal.get("proposalCode"),
+                        "approvedContentHash": proposal.get("approvedContentHash"),
+                    }
+                ),
                 "created_at": now,
             },
             include_result_metadata=False,
@@ -202,6 +305,49 @@ class InMemoryAdminProposalRepository:
         if not proposal or proposal.get("deletedAt") or not _can_view(proposal, principal):
             return None
         return dict(proposal)
+
+    def transition(self, proposal_id, action, principal, now=None, note=None):
+        proposal = self.proposals.get(proposal_id)
+        if not proposal or proposal.get("deletedAt"):
+            return None
+        _validate_transition(proposal, action, principal)
+
+        from_status = proposal.get("status")
+        to_status = PROPOSAL_REVIEW_ACTIONS[action]["to"]
+        proposal.update(
+            {
+                "status": to_status,
+                "reviewedBy": principal.get("userId"),
+                "reviewedAt": now or self.now,
+                "reviewNote": note,
+                "approvedContentHash": _approved_content_hash(proposal) if to_status == "approved" else None,
+                "updatedAt": now or self.now,
+            }
+        )
+        self.history.append(
+            {
+                "proposalId": proposal_id,
+                "action": action,
+                "fromStatus": from_status,
+                "toStatus": to_status,
+                "actorUserId": principal.get("userId"),
+                "actorRoles": list(principal.get("roles") or []),
+                "note": note,
+                "metadata": {
+                    "proposalCode": proposal.get("proposalCode"),
+                    "approvedContentHash": proposal.get("approvedContentHash"),
+                },
+                "createdAt": now or self.now,
+            }
+        )
+        return dict(proposal)
+
+    def list_history_visible(self, proposal_id, principal, limit=50):
+        proposal = self.get_visible(proposal_id, principal)
+        if not proposal:
+            return None
+        items = [item for item in self.history if item.get("proposalId") == proposal_id]
+        return [dict(item) for item in items[:limit]]
 
 
 def _build_proposal(proposal_id, proposal_code, principal, payload, now):
@@ -305,6 +451,21 @@ def _proposal_from_row(row):
     }
 
 
+def _history_from_row(row):
+    return {
+        "historyId": row.get("id"),
+        "proposalId": row.get("proposal_id"),
+        "action": row.get("action"),
+        "fromStatus": row.get("from_status"),
+        "toStatus": row.get("to_status"),
+        "actorUserId": row.get("actor_user_id"),
+        "actorRoles": json_loads(row.get("actor_roles_json"), []),
+        "note": row.get("note"),
+        "metadata": json_loads(row.get("metadata_json"), {}),
+        "createdAt": row.get("created_at"),
+    }
+
+
 def _can_view(proposal, principal):
     if has_any_role(principal, {ROLE_ADMIN}):
         return True
@@ -314,6 +475,41 @@ def _can_view(proposal, principal):
     return proposal.get("createdBy") == principal.get("userId") or (
         bool(proposal.get("organizationId")) and proposal.get("organizationId") in organization_ids
     )
+
+
+def _validate_transition(proposal, action, principal):
+    if action not in PROPOSAL_REVIEW_ACTIONS:
+        raise ProposalTransitionError(400, "INVALID_REVIEW_ACTION", "Review action is invalid")
+    if proposal.get("createdBy") == principal.get("userId"):
+        raise ProposalTransitionError(403, "SELF_REVIEW_FORBIDDEN", "Users cannot review their own proposal")
+
+    current_status = proposal.get("status")
+    allowed_statuses = PROPOSAL_REVIEW_ACTIONS[action]["from"]
+    if current_status not in allowed_statuses:
+        raise ProposalTransitionError(
+            409,
+            "INVALID_PROPOSAL_STATE",
+            "Current proposal status does not allow this review action",
+        )
+
+
+def _approved_content_hash(proposal):
+    content = {
+        "contentType": proposal.get("contentType"),
+        "regionId": proposal.get("regionId"),
+        "cityId": proposal.get("cityId"),
+        "cityName": proposal.get("cityName"),
+        "title": proposal.get("title"),
+        "description": proposal.get("description"),
+        "officialSourceName": proposal.get("officialSourceName"),
+        "officialSourceUrl": proposal.get("officialSourceUrl"),
+        "sourceUpdatedAt": proposal.get("sourceUpdatedAt"),
+        "evidenceText": proposal.get("evidenceText"),
+        "payload": proposal.get("payload") or {},
+        "serviceBoundary": proposal.get("serviceBoundary") or {},
+        "gatewayCity": proposal.get("gatewayCity") or {},
+    }
+    return sha256(json_dumps(content).encode("utf-8")).hexdigest()
 
 
 # EOF: src/admin/proposals_repository.py

@@ -8,7 +8,7 @@ import logging
 from datetime import datetime, timezone
 
 from admin.repository import RdsDataAdminUserRepository
-from admin.proposals_repository import RdsDataAdminProposalRepository
+from admin.proposals_repository import ProposalTransitionError, RdsDataAdminProposalRepository
 from shared.auth import AuthTokenError
 from shared.authorization import (
     AuthorizationError,
@@ -52,6 +52,8 @@ def handle_request(event, repository=None, proposal_repository=None):
     try:
         return _handle_request(event or {}, repository, proposal_repository)
     except AdminRequestError as error:
+        return error_response(error.status_code, error.code, error.message)
+    except ProposalTransitionError as error:
         return error_response(error.status_code, error.code, error.message)
     except AuthorizationError as error:
         return error_response(error.status_code, error.code, error.message)
@@ -114,6 +116,31 @@ def _handle_request(event, repository, proposal_repository):
         return json_response(200, {"items": [_public_proposal(proposal) for proposal in proposals], "nextCursor": None})
 
     proposal_id = _proposal_id(event, path)
+    proposal_action = _proposal_action(path, proposal_id)
+    if method == "POST" and proposal_id and proposal_action in {"review", "approve", "reject"}:
+        principal = require_admin_access(event)
+        payload = _validate_review_payload(_json_body(event), require_note=proposal_action == "reject")
+        proposal_repository = proposal_repository or RdsDataAdminProposalRepository.from_env()
+        proposal = proposal_repository.transition(
+            proposal_id,
+            _review_action_to_status(proposal_action),
+            principal,
+            _now_iso(),
+            note=payload.get("reviewNote"),
+        )
+        if not proposal:
+            raise AdminRequestError(404, "PROPOSAL_NOT_FOUND", "Data proposal was not found")
+        return json_response(200, {"proposal": _public_proposal(proposal, include_detail=True)})
+
+    if method == "GET" and proposal_id and proposal_action == "history":
+        principal = require_roles(event, {ROLE_ADMIN, ROLE_DATA_PROVIDER, ROLE_LOCAL_OPERATOR})
+        proposal_repository = proposal_repository or RdsDataAdminProposalRepository.from_env()
+        limit = _parse_limit((event.get("queryStringParameters") or {}).get("limit"))
+        history = proposal_repository.list_history_visible(proposal_id, principal, limit=limit)
+        if history is None:
+            raise AdminRequestError(404, "PROPOSAL_NOT_FOUND", "Data proposal was not found")
+        return json_response(200, {"items": [_public_proposal_history(item) for item in history], "nextCursor": None})
+
     if method == "GET" and proposal_id and path.endswith(f"/{proposal_id}"):
         principal = require_roles(event, {ROLE_ADMIN, ROLE_DATA_PROVIDER, ROLE_LOCAL_OPERATOR})
         proposal_repository = proposal_repository or RdsDataAdminProposalRepository.from_env()
@@ -173,6 +200,26 @@ def _validate_create_proposal_payload(payload):
     return normalized
 
 
+def _validate_review_payload(payload, require_note=False):
+    forbidden = sorted(PROPOSAL_FORBIDDEN_FIELDS.intersection(payload.keys()))
+    if forbidden:
+        raise AdminRequestError(400, "INVALID_REVIEW_PAYLOAD", "Authority fields are not writable")
+
+    allowed = {"reviewNote", "note"}
+    unexpected = sorted(set(payload.keys()) - allowed)
+    if unexpected:
+        raise AdminRequestError(400, "INVALID_REVIEW_PAYLOAD", "Review payload contains unsupported fields")
+
+    note = payload.get("reviewNote", payload.get("note"))
+    if note not in (None, "") and not isinstance(note, str):
+        raise AdminRequestError(400, "INVALID_REVIEW_PAYLOAD", "reviewNote must be a string")
+    note = note.strip() if isinstance(note, str) else None
+    note = note or None
+    if require_note and not note:
+        raise AdminRequestError(400, "INVALID_REVIEW_PAYLOAD", "reviewNote is required")
+    return {"reviewNote": note}
+
+
 def _public_proposal(proposal, include_detail=False):
     result = {
         "proposalId": proposal.get("proposalId"),
@@ -207,6 +254,21 @@ def _public_proposal(proposal, include_detail=False):
             }
         )
     return result
+
+
+def _public_proposal_history(item):
+    return {
+        "historyId": item.get("historyId"),
+        "proposalId": item.get("proposalId"),
+        "action": item.get("action"),
+        "fromStatus": item.get("fromStatus"),
+        "toStatus": item.get("toStatus"),
+        "actorUserId": item.get("actorUserId"),
+        "actorRoles": item.get("actorRoles") or [],
+        "note": item.get("note"),
+        "metadata": item.get("metadata") or {},
+        "createdAt": item.get("createdAt"),
+    }
 
 
 def _json_body(event):
@@ -257,6 +319,23 @@ def _proposal_id(event, path):
     if path.startswith(prefix):
         return path[len(prefix) :].split("/", 1)[0]
     return None
+
+
+def _proposal_action(path, proposal_id):
+    if not proposal_id:
+        return None
+    prefix = f"{PROPOSAL_COLLECTION_PATH}/{proposal_id}/"
+    if not path.startswith(prefix):
+        return None
+    return path[len(prefix) :].strip("/") or None
+
+
+def _review_action_to_status(action):
+    return {
+        "review": "in_review",
+        "approve": "approved",
+        "reject": "rejected",
+    }[action]
 
 
 def _non_empty_string(value):

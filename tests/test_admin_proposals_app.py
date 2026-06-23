@@ -303,6 +303,166 @@ class AdminProposalsAppTest(unittest.TestCase):
         self.assertEqual(json.loads(assigned_response["body"])["proposal"]["proposalId"], assigned["proposalId"])
         self.assertEqual(other_response["statusCode"], 404)
 
+    def test_admin_can_review_and_approve_proposal_with_history(self):
+        proposal = self.create_proposal(user_id="provider-1", organization_ids=["org-gangneung"])
+
+        review_response = self.request(
+            make_event(
+                "POST",
+                f"/api/v1/admin/data-proposals/{proposal['proposalId']}/review",
+                {"reviewNote": "checking official source"},
+                authorizer_context=admin_context(user_id="admin-1"),
+                path_parameters={"proposalId": proposal["proposalId"]},
+            )
+        )
+        review_body = json.loads(review_response["body"])
+
+        approve_response = self.request(
+            make_event(
+                "POST",
+                f"/api/v1/admin/data-proposals/{proposal['proposalId']}/approve",
+                {"reviewNote": "approved for publish queue"},
+                authorizer_context=admin_context(user_id="admin-1"),
+                path_parameters={"proposalId": proposal["proposalId"]},
+            )
+        )
+        approve_body = json.loads(approve_response["body"])
+
+        history_response = self.request(
+            make_event(
+                "GET",
+                f"/api/v1/admin/data-proposals/{proposal['proposalId']}/history",
+                authorizer_context=provider_context(user_id="provider-1", organization_ids=["org-gangneung"]),
+                path_parameters={"proposalId": proposal["proposalId"]},
+            )
+        )
+        history_body = json.loads(history_response["body"])
+
+        self.assertEqual(review_response["statusCode"], 200)
+        self.assertEqual(review_body["proposal"]["status"], "in_review")
+        self.assertEqual(review_body["proposal"]["reviewedBy"], "admin-1")
+        self.assertEqual(approve_response["statusCode"], 200)
+        self.assertEqual(approve_body["proposal"]["status"], "approved")
+        self.assertEqual(approve_body["proposal"]["reviewNote"], "approved for publish queue")
+        self.assertIsInstance(approve_body["proposal"]["approvedContentHash"], str)
+        self.assertEqual(len(approve_body["proposal"]["approvedContentHash"]), 64)
+        self.assertEqual(history_response["statusCode"], 200)
+        self.assertEqual([item["action"] for item in history_body["items"]], ["submitted", "in_review", "approved"])
+        self.assertEqual(history_body["items"][-1]["note"], "approved for publish queue")
+
+    def test_admin_can_reject_submitted_proposal_with_required_note(self):
+        proposal = self.create_proposal(user_id="provider-1", organization_ids=["org-gangneung"])
+
+        response = self.request(
+            make_event(
+                "POST",
+                f"/api/v1/admin/data-proposals/{proposal['proposalId']}/reject",
+                {"reviewNote": "official source is missing"},
+                authorizer_context=admin_context(user_id="admin-1"),
+                path_parameters={"proposalId": proposal["proposalId"]},
+            )
+        )
+        body = json.loads(response["body"])
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(body["proposal"]["status"], "rejected")
+        self.assertEqual(body["proposal"]["reviewedBy"], "admin-1")
+        self.assertEqual(body["proposal"]["reviewNote"], "official source is missing")
+
+    def test_reject_requires_review_note(self):
+        proposal = self.create_proposal(user_id="provider-1", organization_ids=["org-gangneung"])
+
+        response = self.request(
+            make_event(
+                "POST",
+                f"/api/v1/admin/data-proposals/{proposal['proposalId']}/reject",
+                {},
+                authorizer_context=admin_context(user_id="admin-1"),
+                path_parameters={"proposalId": proposal["proposalId"]},
+            )
+        )
+        body = json.loads(response["body"])
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(body["error"]["code"], "INVALID_REVIEW_PAYLOAD")
+
+    def test_provider_and_local_operator_cannot_change_review_status(self):
+        proposal = self.create_proposal(user_id="provider-1", organization_ids=["org-gangneung"])
+
+        provider_response = self.request(
+            make_event(
+                "POST",
+                f"/api/v1/admin/data-proposals/{proposal['proposalId']}/review",
+                {"reviewNote": "forged"},
+                authorizer_context=provider_context(user_id="provider-1", organization_ids=["org-gangneung"]),
+                path_parameters={"proposalId": proposal["proposalId"]},
+            )
+        )
+        operator_response = self.request(
+            make_event(
+                "POST",
+                f"/api/v1/admin/data-proposals/{proposal['proposalId']}/approve",
+                {"reviewNote": "forged"},
+                authorizer_context=local_operator_context(region_ids=["KR-42-150"]),
+                path_parameters={"proposalId": proposal["proposalId"]},
+            )
+        )
+
+        self.assertEqual(provider_response["statusCode"], 403)
+        self.assertEqual(json.loads(provider_response["body"])["error"]["code"], "ADMIN_ACCESS_REQUIRED")
+        self.assertEqual(operator_response["statusCode"], 403)
+        self.assertEqual(json.loads(operator_response["body"])["error"]["code"], "ADMIN_ACCESS_REQUIRED")
+
+    def test_creator_cannot_review_own_proposal_even_with_admin_role(self):
+        proposal = self.create_proposal(user_id="admin-1", organization_ids=["org-gangneung"])
+
+        response = self.request(
+            make_event(
+                "POST",
+                f"/api/v1/admin/data-proposals/{proposal['proposalId']}/review",
+                {"reviewNote": "self review"},
+                authorizer_context=admin_context(user_id="admin-1"),
+                path_parameters={"proposalId": proposal["proposalId"]},
+            )
+        )
+        body = json.loads(response["body"])
+
+        self.assertEqual(response["statusCode"], 403)
+        self.assertEqual(body["error"]["code"], "SELF_REVIEW_FORBIDDEN")
+
+    def test_approve_requires_in_review_state(self):
+        proposal = self.create_proposal(user_id="provider-1", organization_ids=["org-gangneung"])
+
+        response = self.request(
+            make_event(
+                "POST",
+                f"/api/v1/admin/data-proposals/{proposal['proposalId']}/approve",
+                {"reviewNote": "skip review"},
+                authorizer_context=admin_context(user_id="admin-1"),
+                path_parameters={"proposalId": proposal["proposalId"]},
+            )
+        )
+        body = json.loads(response["body"])
+
+        self.assertEqual(response["statusCode"], 409)
+        self.assertEqual(body["error"]["code"], "INVALID_PROPOSAL_STATE")
+
+    def test_history_hides_invisible_proposal(self):
+        other = self.create_proposal(user_id="provider-2", organization_ids=["org-andong"])
+
+        response = self.request(
+            make_event(
+                "GET",
+                f"/api/v1/admin/data-proposals/{other['proposalId']}/history",
+                authorizer_context=provider_context(user_id="provider-1", organization_ids=["org-gangneung"]),
+                path_parameters={"proposalId": other["proposalId"]},
+            )
+        )
+        body = json.loads(response["body"])
+
+        self.assertEqual(response["statusCode"], 404)
+        self.assertEqual(body["error"]["code"], "PROPOSAL_NOT_FOUND")
+
     def test_invalid_proposal_payload_returns_validation_error(self):
         response = self.request(
             make_event(

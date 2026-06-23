@@ -590,6 +590,38 @@ Resources:
             Path: /api/v1/admin/data-proposals/{proposalId}
             Auth:
               Authorizer: LovvTokenAuthorizer
+        AdminReviewDataProposal:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: POST
+            Path: /api/v1/admin/data-proposals/{proposalId}/review
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminApproveDataProposal:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: POST
+            Path: /api/v1/admin/data-proposals/{proposalId}/approve
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminRejectDataProposal:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: POST
+            Path: /api/v1/admin/data-proposals/{proposalId}/reject
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminListDataProposalHistory:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: GET
+            Path: /api/v1/admin/data-proposals/{proposalId}/history
+            Auth:
+              Authorizer: LovvTokenAuthorizer
 
   PreferenceFunction:
     Type: AWS::Serverless::Function

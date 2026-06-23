@@ -70,12 +70,16 @@ class ExistingDataStackTemplateTest(unittest.TestCase):
     def test_admin_routes_use_lovv_token_authorizer(self):
         admin_index = self.template.index("AdminFunction:")
         admin_block = self.template[admin_index : self.template.index("PreferenceFunction:")]
-        self.assertEqual(admin_block.count("Authorizer: LovvTokenAuthorizer"), 5)
+        self.assertEqual(admin_block.count("Authorizer: LovvTokenAuthorizer"), 9)
         for path in (
             "Path: /api/v1/admin/users",
             "Path: /api/v1/admin/users/{userId}",
             "Path: /api/v1/admin/data-proposals",
             "Path: /api/v1/admin/data-proposals/{proposalId}",
+            "Path: /api/v1/admin/data-proposals/{proposalId}/review",
+            "Path: /api/v1/admin/data-proposals/{proposalId}/approve",
+            "Path: /api/v1/admin/data-proposals/{proposalId}/reject",
+            "Path: /api/v1/admin/data-proposals/{proposalId}/history",
         ):
             path_index = admin_block.index(path)
             self.assertIn("Authorizer: LovvTokenAuthorizer", admin_block[path_index : path_index + 220])
