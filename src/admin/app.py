@@ -6,7 +6,7 @@ import logging
 
 from admin.repository import RdsDataAdminUserRepository
 from shared.auth import AuthTokenError
-from shared.current_user import authenticated_claims
+from shared.authorization import AuthorizationError, require_admin_access
 from shared.http import error_response, json_response
 
 
@@ -22,6 +22,8 @@ def handle_request(event, repository=None):
         return _handle_request(event or {}, repository)
     except AdminRequestError as error:
         return error_response(error.status_code, error.code, error.message)
+    except AuthorizationError as error:
+        return error_response(error.status_code, error.code, error.message)
     except AuthTokenError as error:
         return error_response(error.status_code, error.code, error.message)
     except Exception as error:
@@ -36,8 +38,7 @@ def _handle_request(event, repository):
     if method == "OPTIONS":
         return json_response(200, {})
 
-    claims = authenticated_claims(event)
-    _require_admin(claims)
+    require_admin_access(event)
     repository = repository or RdsDataAdminUserRepository.from_env()
 
     if method == "GET" and path == "/api/v1/admin/users":
@@ -51,20 +52,6 @@ def _handle_request(event, repository):
         return json_response(200, {"user": _public_admin_user(user)})
 
     return error_response(404, "NOT_FOUND", "Route not found")
-
-
-def _require_admin(claims):
-    if "R-ADMIN" not in _claim_roles(claims):
-        raise AdminRequestError(403, "FORBIDDEN", "Admin role is required")
-
-
-def _claim_roles(claims):
-    roles = (claims or {}).get("roles")
-    if isinstance(roles, str):
-        return [role.strip() for role in roles.split(",") if role.strip()]
-    if isinstance(roles, list):
-        return [str(role) for role in roles]
-    return []
 
 
 def _public_admin_user(user):
