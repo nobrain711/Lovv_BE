@@ -50,6 +50,9 @@ def create_access_token(
     claims = {
         "sub": user_id,
         "roles": list(DEFAULT_ROLES) if roles is None else list(roles),
+        # Admin RBAC scopes are embedded in the access token so API routes can
+        # authorize without a DB round-trip. authz_version allows invalidating
+        # stale tokens when a user's roles/scopes change.
         "organization_ids": _string_list(organization_ids),
         "region_ids": _string_list(region_ids),
         "authz_version": int(authz_version or 1),

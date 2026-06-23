@@ -5,6 +5,11 @@
 from shared.current_user import authenticated_claims
 
 
+# Server-side authorization is the source of truth. Every admin route re-derives
+# the caller's roles and org/region scopes from the verified access token and
+# fails closed if anything is missing. Frontend tab/button gating is UX only and
+# is always re-checked here, so a client cannot escalate by sending its own
+# role/scope fields in the request body.
 ROLE_USER = "R-USER"
 ROLE_ADMIN = "R-ADMIN"
 ROLE_DATA_PROVIDER = "R-DATA-PROVIDER"
@@ -20,6 +25,7 @@ class AuthorizationError(Exception):
 
 
 def authenticated_principal(event):
+    # Build a normalized principal (roles + org/region scopes) from verified claims.
     claims = authenticated_claims(event)
     user_id = claims.get("userId") or claims.get("sub")
     if not user_id:
@@ -38,6 +44,7 @@ def authenticated_principal(event):
 
 
 def require_roles(event, allowed_roles, error_code="ROLE_FORBIDDEN", message=None):
+    # Allow the call only if the caller holds at least one of allowed_roles, else 403.
     principal = authenticated_principal(event)
     if not has_any_role(principal, allowed_roles):
         raise AuthorizationError(
@@ -49,6 +56,8 @@ def require_roles(event, allowed_roles, error_code="ROLE_FORBIDDEN", message=Non
 
 
 def require_admin_access(event):
+    # Admin-only guard. Distinct error code lets the UI tell "needs admin" apart
+    # from a generic role denial.
     return require_roles(
         event,
         {ROLE_ADMIN},
@@ -64,6 +73,8 @@ def has_any_role(principal, allowed_roles):
 
 
 def normalize_roles(roles):
+    # Accept a list or comma-separated string, trim/dedupe, and treat malformed
+    # input as "no roles" (fail closed).
     if roles is None:
         return []
     if isinstance(roles, str):

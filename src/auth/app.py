@@ -666,6 +666,8 @@ def _public_user(user, is_new_user=None, provider=None):
 
 
 def _token_authorization_kwargs(user):
+    # Collect the DB-derived roles/scopes to stamp into the access token. Defaults
+    # to R-USER with empty scopes so a misconfigured record cannot gain admin rights.
     return {
         "roles": user.get("roles") if "roles" in user else ["R-USER"],
         "organization_ids": user.get("organizationIds") or [],

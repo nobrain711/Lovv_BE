@@ -244,6 +244,9 @@ class RdsDataUserRepository:
         return [_social_account_from_row(row) for row in (rows or [])]
 
     def _with_authorization(self, user):
+        # The DB is the source of truth for admin authority: merge the legacy
+        # users.role with the active role/region assignments so the issued token
+        # reflects current grants (revoking an assignment drops it on next login).
         if not user:
             return None
         role_assignments = self._active_role_assignments(user["userId"])
@@ -261,6 +264,8 @@ class RdsDataUserRepository:
         return user
 
     def _active_role_assignments(self, user_id):
+        # Only assignments that are active AND within their valid_from/valid_until
+        # window count; suspended/revoked/expired grants are ignored.
         return self.rds.fetch_all(
             f"""
             SELECT role_code, organization_id
@@ -431,6 +436,8 @@ class InMemoryUserRepository:
 
 
 def roles_for_db_role(role):
+    # Map the legacy single users.role column to RBAC role codes. Unknown values
+    # (e.g. "system") map to [] so they grant nothing by default (fail closed).
     normalized = (role or "user").strip().lower() if isinstance(role, str) else "user"
     if normalized == "admin":
         return ["R-ADMIN"]

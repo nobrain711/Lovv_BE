@@ -1,6 +1,10 @@
 # @file src/admin/proposals_repository.py
 # @description Admin console data proposal repository backed by the configured SQL client.
 # @lastModified 2026-06-23
+#
+# Owns the data-proposal lifecycle (create -> review -> approve/reject + history)
+# and the row-level visibility rules. Status transitions and conflict-of-interest
+# checks are enforced here so they hold regardless of the calling route.
 
 import os
 import uuid
@@ -11,6 +15,8 @@ from shared.database import create_database_client
 from shared.rds_data import json_dumps, json_loads
 
 
+# Review state machine: for each action, the statuses it may transition FROM and
+# the status it moves TO. Enforced in _validate_transition (409 if not allowed).
 PROPOSAL_REVIEW_ACTIONS = {
     "in_review": {"from": {"submitted", "change_requested"}, "to": "in_review"},
     "approved": {"from": {"in_review"}, "to": "approved"},
@@ -467,6 +473,8 @@ def _history_from_row(row):
 
 
 def _can_view(proposal, principal):
+    # Row-level visibility: admin = all, local operator = assigned regions,
+    # provider = own proposals or same-organization proposals.
     if has_any_role(principal, {ROLE_ADMIN}):
         return True
     if has_any_role(principal, {ROLE_LOCAL_OPERATOR}):
@@ -478,6 +486,8 @@ def _can_view(proposal, principal):
 
 
 def _validate_transition(proposal, action, principal):
+    # Block conflict-of-interest (self-review) and illegal state jumps before any
+    # write happens.
     if action not in PROPOSAL_REVIEW_ACTIONS:
         raise ProposalTransitionError(400, "INVALID_REVIEW_ACTION", "Review action is invalid")
     if proposal.get("createdBy") == principal.get("userId"):
@@ -494,6 +504,8 @@ def _validate_transition(proposal, action, principal):
 
 
 def _approved_content_hash(proposal):
+    # Stable hash of the approved content snapshot; lets downstream publishing
+    # track exactly what was approved.
     content = {
         "contentType": proposal.get("contentType"),
         "regionId": proposal.get("regionId"),

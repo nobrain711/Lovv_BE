@@ -1,6 +1,11 @@
 # @file src/admin/app.py
 # @description Admin console Lambda handler for Lovv API.
 # @lastModified 2026-06-23
+#
+# Routes the admin console endpoints (users + data-proposal workflow). Every
+# branch authorizes against the verified token via shared.authorization, and
+# ownership/authority fields are never read from the request body: the server
+# derives them from the principal. See docs/specs/ADMIN_RBAC_SPEC.md.
 
 import base64
 import json
@@ -24,6 +29,8 @@ from shared.http import error_response, json_response
 
 LOGGER = logging.getLogger(__name__)
 PROPOSAL_COLLECTION_PATH = "/api/v1/admin/data-proposals"
+# Authority/ownership fields only the server may set; clients may never send
+# these on create/review payloads (rejected with INVALID_*_PAYLOAD).
 PROPOSAL_FORBIDDEN_FIELDS = {
     "roles",
     "role",
@@ -86,6 +93,8 @@ def _handle_request(event, repository, proposal_repository):
         return json_response(200, {"user": _public_admin_user(user)})
 
     if method == "POST" and path == PROPOSAL_COLLECTION_PATH:
+        # Only data providers author proposals. Admins review but cannot create:
+        # roles are not hierarchical (R-ADMIN does not imply R-DATA-PROVIDER).
         principal = require_roles(
             event,
             {ROLE_DATA_PROVIDER},
@@ -97,6 +106,8 @@ def _handle_request(event, repository, proposal_repository):
         return json_response(201, {"proposal": _public_proposal(proposal, include_detail=True)})
 
     if method == "GET" and path == PROPOSAL_COLLECTION_PATH:
+        # Visibility is scoped by role: admin sees all, local operator sees its
+        # assigned regions, provider sees its own/organization proposals.
         principal = require_roles(event, {ROLE_ADMIN, ROLE_DATA_PROVIDER, ROLE_LOCAL_OPERATOR})
         proposal_repository = proposal_repository or RdsDataAdminProposalRepository.from_env()
         limit = _parse_limit((event.get("queryStringParameters") or {}).get("limit"))
@@ -118,6 +129,8 @@ def _handle_request(event, repository, proposal_repository):
     proposal_id = _proposal_id(event, path)
     proposal_action = _proposal_action(path, proposal_id)
     if method == "POST" and proposal_id and proposal_action in {"review", "approve", "reject"}:
+        # State changes are admin-only; the repository also blocks reviewing
+        # one's own proposal (SELF_REVIEW_FORBIDDEN).
         principal = require_admin_access(event)
         payload = _validate_review_payload(_json_body(event), require_note=proposal_action == "reject")
         proposal_repository = proposal_repository or RdsDataAdminProposalRepository.from_env()
