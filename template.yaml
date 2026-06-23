@@ -539,6 +539,7 @@ Resources:
           ADMIN_DATA_PROPOSAL_HISTORY_TABLE_NAME: !Ref AdminDataProposalHistoryTableName
           MONTHLY_CURATED_DESTINATIONS_TABLE_NAME: monthly_curated_destinations
           ADMIN_PUBLISH_JOBS_TABLE_NAME: admin_publish_jobs
+          DESTINATION_METRICS_DAILY_TABLE_NAME: destination_metrics_daily
       VpcConfig:
         SecurityGroupIds:
           - !Ref AppFunctionSecurityGroup
@@ -686,6 +687,30 @@ Resources:
             ApiId: !Ref LovvHttpApi
             Method: POST
             Path: /api/v1/admin/monthly-destinations/{destinationId}/reject
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminRecordMonthlyDestinationEvent:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: POST
+            Path: /api/v1/admin/monthly-destinations/{destinationId}/events
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminListMonthlyDestinationMetrics:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: GET
+            Path: /api/v1/admin/monthly-destinations/{destinationId}/metrics
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminListDestinationMetricsSummary:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: GET
+            Path: /api/v1/admin/metrics/destinations
             Auth:
               Authorizer: LovvTokenAuthorizer
         AdminListDestinationPublishJobs:

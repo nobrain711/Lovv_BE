@@ -23,6 +23,10 @@ from admin.publish_jobs_repository import (
     PublishJobTransitionError,
     RdsDataPublishJobRepository,
 )
+from admin.metrics_repository import (
+    EVENT_COUNTER_COLUMNS,
+    RdsDataDestinationMetricsRepository,
+)
 from shared.auth import AuthTokenError
 from shared.authorization import (
     AuthorizationError,
@@ -80,14 +84,24 @@ PUBLISH_JOB_FORBIDDEN_FIELDS = {
     "roles", "role", "userId", "user_id",
 }
 
+# Basic aggregate metrics (step 13). Event writes increment daily aggregate
+# counters only; raw user-level event logs are intentionally not stored.
+METRICS_SUMMARY_PATH = "/api/v1/admin/metrics/destinations"
+METRICS_DATE_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+METRICS_FORBIDDEN_FIELDS = {
+    "roles", "role", "userId", "user_id", "createdBy", "created_by",
+    "organizationId", "organization_id", "regionIds", "region_ids",
+    "cityId", "city_id", "regionId", "region_id",
+}
+
 
 def lambda_handler(event, context):
     return handle_request(event or {})
 
 
-def handle_request(event, repository=None, proposal_repository=None, monthly_repository=None, publish_jobs_repository=None):
+def handle_request(event, repository=None, proposal_repository=None, monthly_repository=None, publish_jobs_repository=None, metrics_repository=None):
     try:
-        return _handle_request(event or {}, repository, proposal_repository, monthly_repository, publish_jobs_repository)
+        return _handle_request(event or {}, repository, proposal_repository, monthly_repository, publish_jobs_repository, metrics_repository)
     except AdminRequestError as error:
         return error_response(error.status_code, error.code, error.message)
     except ProposalTransitionError as error:
@@ -105,7 +119,7 @@ def handle_request(event, repository=None, proposal_repository=None, monthly_rep
         return error_response(500, "INTERNAL_ERROR", "Internal server error")
 
 
-def _handle_request(event, repository, proposal_repository, monthly_repository=None, publish_jobs_repository=None):
+def _handle_request(event, repository, proposal_repository, monthly_repository=None, publish_jobs_repository=None, metrics_repository=None):
     method = _event_method(event)
     path = _event_path(event)
 
@@ -240,6 +254,31 @@ def _handle_request(event, repository, proposal_repository, monthly_repository=N
             )
         return json_response(200, {"items": [_public_monthly_destination(item) for item in destinations], "nextCursor": None})
 
+    if method == "GET" and path == METRICS_SUMMARY_PATH:
+        # Admin sees all destinations; local operators are scoped to their
+        # assigned regions. Metrics remain aggregated per destination/day.
+        principal = require_roles(event, {ROLE_ADMIN, ROLE_LOCAL_OPERATOR})
+        query = event.get("queryStringParameters") or {}
+        start_date = _validate_metric_date(query.get("startDate"), "startDate") if query.get("startDate") else None
+        end_date = _validate_metric_date(query.get("endDate"), "endDate") if query.get("endDate") else None
+        limit = _parse_limit(query.get("limit"))
+        metrics_repository = metrics_repository or RdsDataDestinationMetricsRepository.from_env()
+        if has_any_role(principal, {ROLE_ADMIN}):
+            items = metrics_repository.list_summary(
+                start_date=start_date,
+                end_date=end_date,
+                region_id=_optional_string(query.get("regionId")),
+                limit=limit,
+            )
+        else:
+            items = metrics_repository.list_summary(
+                start_date=start_date,
+                end_date=end_date,
+                region_ids=principal.get("regionIds") or [],
+                limit=limit,
+            )
+        return json_response(200, {"items": items, "nextCursor": None})
+
     if method == "POST" and monthly_id and monthly_action in MONTHLY_ACTIONS:
         # Publish-state transitions are admin-only and validated against the state
         # machine in the repository (409 MONTHLY_TRANSITION_FORBIDDEN if illegal).
@@ -261,6 +300,29 @@ def _handle_request(event, repository, proposal_repository, monthly_repository=N
             body["reflectionJobs"] = [_public_publish_job(job) for job in jobs]
         return json_response(200, body)
 
+    if method == "POST" and monthly_id and monthly_action == "events":
+        # Event collection is limited to admin/local-operator sessions in this
+        # admin PoC. Product-facing anonymous collection can be split into a
+        # separate public route later; this path is for controlled verification.
+        principal = require_roles(event, {ROLE_ADMIN, ROLE_LOCAL_OPERATOR})
+        payload = _validate_metrics_event_payload(_json_body(event))
+        monthly_repository = monthly_repository or RdsDataMonthlyDestinationRepository.from_env()
+        destination = monthly_repository.get(monthly_id)
+        if not destination:
+            raise AdminRequestError(404, "MONTHLY_DESTINATION_NOT_FOUND", "Monthly destination was not found")
+        if not has_any_role(principal, {ROLE_ADMIN}) and destination.get("regionId") not in set(principal.get("regionIds") or []):
+            raise AdminRequestError(404, "MONTHLY_DESTINATION_NOT_FOUND", "Monthly destination was not found")
+        metrics_repository = metrics_repository or RdsDataDestinationMetricsRepository.from_env()
+        metric = metrics_repository.record_event(
+            destination,
+            payload["eventType"],
+            payload["metricDate"],
+            _now_iso(),
+            increment=payload["increment"],
+            distinct_user_increment=payload["distinctUserIncrement"],
+        )
+        return json_response(202, {"metric": metric})
+
     if method == "GET" and monthly_id and path.endswith(f"/{monthly_id}"):
         principal = require_roles(event, {ROLE_ADMIN, ROLE_LOCAL_OPERATOR})
         monthly_repository = monthly_repository or RdsDataMonthlyDestinationRepository.from_env()
@@ -270,6 +332,27 @@ def _handle_request(event, repository, proposal_repository, monthly_repository=N
         if not has_any_role(principal, {ROLE_ADMIN}) and destination.get("regionId") not in set(principal.get("regionIds") or []):
             raise AdminRequestError(404, "MONTHLY_DESTINATION_NOT_FOUND", "Monthly destination was not found")
         return json_response(200, {"destination": _public_monthly_destination(destination)})
+
+    if method == "GET" and monthly_id and monthly_action == "metrics":
+        principal = require_roles(event, {ROLE_ADMIN, ROLE_LOCAL_OPERATOR})
+        monthly_repository = monthly_repository or RdsDataMonthlyDestinationRepository.from_env()
+        destination = monthly_repository.get(monthly_id)
+        if not destination:
+            raise AdminRequestError(404, "MONTHLY_DESTINATION_NOT_FOUND", "Monthly destination was not found")
+        if not has_any_role(principal, {ROLE_ADMIN}) and destination.get("regionId") not in set(principal.get("regionIds") or []):
+            raise AdminRequestError(404, "MONTHLY_DESTINATION_NOT_FOUND", "Monthly destination was not found")
+        query = event.get("queryStringParameters") or {}
+        start_date = _validate_metric_date(query.get("startDate"), "startDate") if query.get("startDate") else None
+        end_date = _validate_metric_date(query.get("endDate"), "endDate") if query.get("endDate") else None
+        limit = _parse_limit(query.get("limit"))
+        metrics_repository = metrics_repository or RdsDataDestinationMetricsRepository.from_env()
+        items = metrics_repository.list_for_destination(
+            monthly_id,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit,
+        )
+        return json_response(200, {"items": items, "nextCursor": None})
 
     if method == "GET" and monthly_id and monthly_action == "publish-jobs":
         # Reflection history for one destination (admin all, operator own regions).
@@ -569,6 +652,65 @@ def _validate_publish_job_action_payload(payload):
         "errorCode": _optional_string(payload.get("errorCode")),
         "errorMessage": _optional_string(payload.get("errorMessage")),
     }
+
+
+def _validate_metrics_event_payload(payload):
+    forbidden = sorted(METRICS_FORBIDDEN_FIELDS.intersection(payload.keys()))
+    if forbidden:
+        raise AdminRequestError(400, "INVALID_METRICS_EVENT_PAYLOAD", "Authority fields are not writable")
+    allowed = {"eventType", "metricDate", "occurredAt", "increment", "distinctUserIncrement"}
+    unexpected = sorted(set(payload.keys()) - allowed)
+    if unexpected:
+        raise AdminRequestError(400, "INVALID_METRICS_EVENT_PAYLOAD", "Metrics event payload contains unsupported fields")
+    event_type = payload.get("eventType")
+    if event_type not in EVENT_COUNTER_COLUMNS:
+        raise AdminRequestError(400, "INVALID_METRICS_EVENT_PAYLOAD", "eventType is invalid")
+    metric_date = payload.get("metricDate")
+    if not metric_date and payload.get("occurredAt"):
+        metric_date = str(payload.get("occurredAt"))[:10]
+    metric_date = _validate_metric_date(metric_date, "metricDate")
+    return {
+        "eventType": event_type,
+        "metricDate": metric_date,
+        "increment": _parse_positive_int(payload.get("increment"), field="increment", default=1, max_value=100),
+        "distinctUserIncrement": _parse_non_negative_int(
+            payload.get("distinctUserIncrement"),
+            field="distinctUserIncrement",
+            default=0,
+            max_value=100,
+        ),
+    }
+
+
+def _validate_metric_date(value, field):
+    if not _non_empty_string(value) or not METRICS_DATE_PATTERN.match(value.strip()):
+        raise AdminRequestError(400, "INVALID_METRICS_DATE", f"{field} must be in YYYY-MM-DD format")
+    try:
+        datetime.strptime(value.strip(), "%Y-%m-%d")
+    except ValueError:
+        raise AdminRequestError(400, "INVALID_METRICS_DATE", f"{field} must be a valid calendar date")
+    return value.strip()
+
+
+def _parse_positive_int(value, field, default, max_value):
+    parsed = _parse_non_negative_int(value, field, default, max_value)
+    if parsed < 1:
+        raise AdminRequestError(400, "INVALID_METRICS_EVENT_PAYLOAD", f"{field} must be a positive integer")
+    return parsed
+
+
+def _parse_non_negative_int(value, field, default, max_value):
+    if value in (None, ""):
+        return default
+    if isinstance(value, bool):
+        raise AdminRequestError(400, "INVALID_METRICS_EVENT_PAYLOAD", f"{field} must be an integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise AdminRequestError(400, "INVALID_METRICS_EVENT_PAYLOAD", f"{field} must be an integer")
+    if parsed < 0:
+        raise AdminRequestError(400, "INVALID_METRICS_EVENT_PAYLOAD", f"{field} must be non-negative")
+    return min(parsed, max_value)
 
 
 def _public_publish_job(job):

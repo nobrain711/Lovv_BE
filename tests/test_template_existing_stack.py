@@ -70,7 +70,7 @@ class ExistingDataStackTemplateTest(unittest.TestCase):
     def test_admin_routes_use_lovv_token_authorizer(self):
         admin_index = self.template.index("AdminFunction:")
         admin_block = self.template[admin_index : self.template.index("PreferenceFunction:")]
-        self.assertEqual(admin_block.count("Authorizer: LovvTokenAuthorizer"), 9)
+        self.assertEqual(admin_block.count("Authorizer: LovvTokenAuthorizer"), 26)
         for path in (
             "Path: /api/v1/admin/users",
             "Path: /api/v1/admin/users/{userId}",
@@ -80,6 +80,22 @@ class ExistingDataStackTemplateTest(unittest.TestCase):
             "Path: /api/v1/admin/data-proposals/{proposalId}/approve",
             "Path: /api/v1/admin/data-proposals/{proposalId}/reject",
             "Path: /api/v1/admin/data-proposals/{proposalId}/history",
+            "Path: /api/v1/admin/monthly-destinations",
+            "Path: /api/v1/admin/monthly-destinations/{destinationId}",
+            "Path: /api/v1/admin/monthly-destinations/{destinationId}/schedule",
+            "Path: /api/v1/admin/monthly-destinations/{destinationId}/publish",
+            "Path: /api/v1/admin/monthly-destinations/{destinationId}/hide",
+            "Path: /api/v1/admin/monthly-destinations/{destinationId}/expire",
+            "Path: /api/v1/admin/monthly-destinations/{destinationId}/reject",
+            "Path: /api/v1/admin/monthly-destinations/{destinationId}/events",
+            "Path: /api/v1/admin/monthly-destinations/{destinationId}/metrics",
+            "Path: /api/v1/admin/metrics/destinations",
+            "Path: /api/v1/admin/monthly-destinations/{destinationId}/publish-jobs",
+            "Path: /api/v1/admin/publish-jobs/{jobId}/start",
+            "Path: /api/v1/admin/publish-jobs/{jobId}/succeed",
+            "Path: /api/v1/admin/publish-jobs/{jobId}/fail",
+            "Path: /api/v1/admin/publish-jobs/{jobId}/retry",
+            "Path: /api/v1/admin/publish-jobs/{jobId}/cancel",
         ):
             path_index = admin_block.index(path)
             self.assertIn("Authorizer: LovvTokenAuthorizer", admin_block[path_index : path_index + 220])
@@ -94,6 +110,9 @@ class ExistingDataStackTemplateTest(unittest.TestCase):
             "RDS_DATABASE_NAME: !Ref RdsDatabaseName",
             "ADMIN_DATA_PROPOSALS_TABLE_NAME: !Ref AdminDataProposalsTableName",
             "ADMIN_DATA_PROPOSAL_HISTORY_TABLE_NAME: !Ref AdminDataProposalHistoryTableName",
+            "MONTHLY_CURATED_DESTINATIONS_TABLE_NAME: monthly_curated_destinations",
+            "ADMIN_PUBLISH_JOBS_TABLE_NAME: admin_publish_jobs",
+            "DESTINATION_METRICS_DAILY_TABLE_NAME: destination_metrics_daily",
         ):
             self.assertIn(expected, admin_block)
 
