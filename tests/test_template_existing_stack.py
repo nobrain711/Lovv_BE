@@ -34,6 +34,8 @@ class ExistingDataStackTemplateTest(unittest.TestCase):
             "RDS_SECRET_ARN: !Ref RdsSecretArn",
             "RDS_DATABASE_NAME: !Ref RdsDatabaseName",
             "AUTH_SESSIONS_TABLE_NAME: !Ref AuthSessionsTableName",
+            "USER_ROLE_ASSIGNMENTS_TABLE_NAME: !Ref UserRoleAssignmentsTableName",
+            "USER_REGION_ASSIGNMENTS_TABLE_NAME: !Ref UserRegionAssignmentsTableName",
             "VpcConfig:",
         ):
             self.assertIn(expected, self.template)

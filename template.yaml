@@ -188,6 +188,14 @@ Parameters:
     Type: String
     Default: plan_reactions
     Description: MySQL plan reactions table name.
+  UserRoleAssignmentsTableName:
+    Type: String
+    Default: user_role_assignments
+    Description: MySQL user role assignments table name for admin RBAC.
+  UserRegionAssignmentsTableName:
+    Type: String
+    Default: user_region_assignments
+    Description: MySQL user region assignments table name for admin RBAC.
   AdminDataProposalsTableName:
     Type: String
     Default: admin_data_proposals
@@ -523,6 +531,8 @@ Resources:
           RDS_DATABASE_NAME: !Ref RdsDatabaseName
           USERS_TABLE_NAME: !Ref UsersTableName
           SOCIAL_ACCOUNTS_TABLE_NAME: !Ref SocialAccountsTableName
+          USER_ROLE_ASSIGNMENTS_TABLE_NAME: !Ref UserRoleAssignmentsTableName
+          USER_REGION_ASSIGNMENTS_TABLE_NAME: !Ref UserRegionAssignmentsTableName
           PREFERENCES_TABLE_NAME: !Ref PreferencesTableName
           SAVED_PLANS_TABLE_NAME: !Ref SavedPlansTableName
           ADMIN_DATA_PROPOSALS_TABLE_NAME: !Ref AdminDataProposalsTableName

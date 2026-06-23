@@ -18,6 +18,9 @@ def authenticated_claims(event):
         "userId": token_claims["sub"],
         "sessionId": token_claims.get("sid", ""),
         "roles": token_claims.get("roles") if "roles" in token_claims else ["R-USER"],
+        "organization_ids": token_claims.get("organization_ids") or [],
+        "region_ids": token_claims.get("region_ids") or [],
+        "authz_version": token_claims.get("authz_version", 1),
         "provider": token_claims.get("provider", ""),
     }
 
