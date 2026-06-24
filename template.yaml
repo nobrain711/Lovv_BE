@@ -697,6 +697,7 @@ Resources:
         Variables:
           MAP_CITY_S3_BUCKET: !Ref MapCityS3Bucket
           MAP_CITY_S3_PREFIX: !Ref MapCityS3Prefix
+          IMAGE_CDN_BASE_URL: '{{resolve:ssm:/lovv/dev/cloudfront/image_base_url}}'
       Policies:
         - Statement:
             - Effect: Allow
