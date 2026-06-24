@@ -5,14 +5,19 @@
 # Append-only record of every admin mutation. Each entry snapshots who acted
 # (actor + roles/org/region scopes), what action on which resource, and the
 # result, so the console and operators can reconstruct an audit trail. Writes are
-# best-effort at the call site: an audit failure must never fail the business
-# operation it records.
+# best-effort: an audit failure must never fail the business operation it records.
+# Both the call site (admin.app._record_audit) and RdsDataAuditLogRepository.record
+# swallow-and-log write errors so a DB/network blip cannot break an admin action.
 
+import logging
 import os
 import uuid
 
 from shared.database import create_database_client
 from shared.rds_data import json_dumps, json_loads
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 AUDIT_RESULTS = {"allowed", "denied", "succeeded", "failed"}
@@ -64,22 +69,27 @@ class RdsDataAuditLogRepository:
         return cls()
 
     def record(self, entry):
-        self.rds.execute(
-            f"""
-            INSERT INTO {self.table}
-              (id, occurred_at, actor_user_id, session_id, roles_snapshot,
-               organization_ids_snapshot, region_ids_snapshot, action, resource_type,
-               resource_id, result, reason_code, request_id, before_summary_json,
-               after_summary_json, metadata_json, created_at)
-            VALUES
-              (:id, :occurred_at, :actor_user_id, :session_id, :roles_snapshot,
-               :organization_ids_snapshot, :region_ids_snapshot, :action, :resource_type,
-               :resource_id, :result, :reason_code, :request_id, :before_summary_json,
-               :after_summary_json, :metadata_json, :created_at)
-            """,
-            _row_params(entry),
-            include_result_metadata=False,
-        )
+        # Best-effort write: audit logging must never fail the business operation
+        # it records, so a DB/network failure here is logged and swallowed.
+        try:
+            self.rds.execute(
+                f"""
+                INSERT INTO {self.table}
+                  (id, occurred_at, actor_user_id, session_id, roles_snapshot,
+                   organization_ids_snapshot, region_ids_snapshot, action, resource_type,
+                   resource_id, result, reason_code, request_id, before_summary_json,
+                   after_summary_json, metadata_json, created_at)
+                VALUES
+                  (:id, :occurred_at, :actor_user_id, :session_id, :roles_snapshot,
+                   :organization_ids_snapshot, :region_ids_snapshot, :action, :resource_type,
+                   :resource_id, :result, :reason_code, :request_id, :before_summary_json,
+                   :after_summary_json, :metadata_json, :created_at)
+                """,
+                _row_params(entry),
+                include_result_metadata=False,
+            )
+        except Exception:
+            LOGGER.exception("Failed to persist admin audit log (action=%s)", entry.get("action"))
         return entry
 
     def list(self, action=None, resource_type=None, result=None, actor_user_id=None, limit=50):
