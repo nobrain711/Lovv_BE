@@ -70,7 +70,7 @@ class ExistingDataStackTemplateTest(unittest.TestCase):
     def test_admin_routes_use_lovv_token_authorizer(self):
         admin_index = self.template.index("AdminFunction:")
         admin_block = self.template[admin_index : self.template.index("PreferenceFunction:")]
-        self.assertEqual(admin_block.count("Authorizer: LovvTokenAuthorizer"), 26)
+        self.assertEqual(admin_block.count("Authorizer: LovvTokenAuthorizer"), 35)
         for path in (
             "Path: /api/v1/admin/users",
             "Path: /api/v1/admin/users/{userId}",
@@ -96,6 +96,13 @@ class ExistingDataStackTemplateTest(unittest.TestCase):
             "Path: /api/v1/admin/publish-jobs/{jobId}/fail",
             "Path: /api/v1/admin/publish-jobs/{jobId}/retry",
             "Path: /api/v1/admin/publish-jobs/{jobId}/cancel",
+            "Path: /api/v1/admin/notices",
+            "Path: /api/v1/admin/notices/{noticeId}/publish",
+            "Path: /api/v1/admin/notices/{noticeId}/archive",
+            "Path: /api/v1/admin/recommendation-policies",
+            "Path: /api/v1/admin/recommendation-policies/{policyId}/activate",
+            "Path: /api/v1/admin/recommendation-policies/{policyId}/archive",
+            "Path: /api/v1/admin/audit-logs",
         ):
             path_index = admin_block.index(path)
             self.assertIn("Authorizer: LovvTokenAuthorizer", admin_block[path_index : path_index + 220])
@@ -113,6 +120,9 @@ class ExistingDataStackTemplateTest(unittest.TestCase):
             "MONTHLY_CURATED_DESTINATIONS_TABLE_NAME: monthly_curated_destinations",
             "ADMIN_PUBLISH_JOBS_TABLE_NAME: admin_publish_jobs",
             "DESTINATION_METRICS_DAILY_TABLE_NAME: destination_metrics_daily",
+            "ADMIN_NOTICES_TABLE_NAME: admin_notices",
+            "ADMIN_RECOMMENDATION_POLICIES_TABLE_NAME: admin_recommendation_policies",
+            "ADMIN_AUDIT_LOGS_TABLE_NAME: admin_audit_logs",
         ):
             self.assertIn(expected, admin_block)
 

@@ -539,7 +539,10 @@ Resources:
           ADMIN_DATA_PROPOSAL_HISTORY_TABLE_NAME: !Ref AdminDataProposalHistoryTableName
           MONTHLY_CURATED_DESTINATIONS_TABLE_NAME: monthly_curated_destinations
           ADMIN_PUBLISH_JOBS_TABLE_NAME: admin_publish_jobs
+          ADMIN_AUDIT_LOGS_TABLE_NAME: admin_audit_logs
           DESTINATION_METRICS_DAILY_TABLE_NAME: destination_metrics_daily
+          ADMIN_NOTICES_TABLE_NAME: admin_notices
+          ADMIN_RECOMMENDATION_POLICIES_TABLE_NAME: admin_recommendation_policies
       VpcConfig:
         SecurityGroupIds:
           - !Ref AppFunctionSecurityGroup
@@ -759,6 +762,78 @@ Resources:
             ApiId: !Ref LovvHttpApi
             Method: POST
             Path: /api/v1/admin/publish-jobs/{jobId}/cancel
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminListAuditLogs:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: GET
+            Path: /api/v1/admin/audit-logs
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminListNotices:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: GET
+            Path: /api/v1/admin/notices
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminCreateNotice:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: POST
+            Path: /api/v1/admin/notices
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminPublishNotice:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: POST
+            Path: /api/v1/admin/notices/{noticeId}/publish
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminArchiveNotice:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: POST
+            Path: /api/v1/admin/notices/{noticeId}/archive
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminListRecommendationPolicies:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: GET
+            Path: /api/v1/admin/recommendation-policies
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminCreateRecommendationPolicy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: POST
+            Path: /api/v1/admin/recommendation-policies
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminActivateRecommendationPolicy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: POST
+            Path: /api/v1/admin/recommendation-policies/{policyId}/activate
+            Auth:
+              Authorizer: LovvTokenAuthorizer
+        AdminArchiveRecommendationPolicy:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref LovvHttpApi
+            Method: POST
+            Path: /api/v1/admin/recommendation-policies/{policyId}/archive
             Auth:
               Authorizer: LovvTokenAuthorizer
 

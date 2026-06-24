@@ -23,9 +23,17 @@ from admin.publish_jobs_repository import (
     PublishJobTransitionError,
     RdsDataPublishJobRepository,
 )
+from admin.audit_logs_repository import RdsDataAuditLogRepository, build_audit_entry
+from shared.rds_data import RdsDataConfigurationError
 from admin.metrics_repository import (
     EVENT_COUNTER_COLUMNS,
     RdsDataDestinationMetricsRepository,
+)
+from admin.operations_repository import (
+    NOTICE_STATUSES,
+    POLICY_STATUSES,
+    OperationTransitionError,
+    RdsDataAdminOperationsRepository,
 )
 from shared.auth import AuthTokenError
 from shared.authorization import (
@@ -42,6 +50,8 @@ from shared.http import error_response, json_response
 
 LOGGER = logging.getLogger(__name__)
 PROPOSAL_COLLECTION_PATH = "/api/v1/admin/data-proposals"
+# Append-only audit trail of admin mutations (step 17).
+AUDIT_LOGS_COLLECTION_PATH = "/api/v1/admin/audit-logs"
 # Authority/ownership fields only the server may set; clients may never send
 # these on create/review payloads (rejected with INVALID_*_PAYLOAD).
 PROPOSAL_FORBIDDEN_FIELDS = {
@@ -94,14 +104,26 @@ METRICS_FORBIDDEN_FIELDS = {
     "cityId", "city_id", "regionId", "region_id",
 }
 
+# Admin operations (step 16): notices and recommendation policy controls. These
+# are high-impact operational changes, so only R-ADMIN may read or mutate them.
+NOTICES_COLLECTION_PATH = "/api/v1/admin/notices"
+POLICIES_COLLECTION_PATH = "/api/v1/admin/recommendation-policies"
+NOTICE_ACTIONS = {"publish", "archive"}
+POLICY_ACTIONS = {"activate", "archive"}
+OPERATION_FORBIDDEN_FIELDS = {
+    "id", "status", "createdBy", "created_by", "publishedBy", "published_by",
+    "publishedAt", "published_at", "activatedBy", "activated_by", "activatedAt",
+    "activated_at", "archivedAt", "archived_at", "roles", "role", "userId", "user_id",
+}
+
 
 def lambda_handler(event, context):
     return handle_request(event or {})
 
 
-def handle_request(event, repository=None, proposal_repository=None, monthly_repository=None, publish_jobs_repository=None, metrics_repository=None):
+def handle_request(event, repository=None, proposal_repository=None, monthly_repository=None, publish_jobs_repository=None, metrics_repository=None, operations_repository=None, audit_repository=None):
     try:
-        return _handle_request(event or {}, repository, proposal_repository, monthly_repository, publish_jobs_repository, metrics_repository)
+        return _handle_request(event or {}, repository, proposal_repository, monthly_repository, publish_jobs_repository, metrics_repository, operations_repository, audit_repository)
     except AdminRequestError as error:
         return error_response(error.status_code, error.code, error.message)
     except ProposalTransitionError as error:
@@ -109,6 +131,8 @@ def handle_request(event, repository=None, proposal_repository=None, monthly_rep
     except MonthlyDestinationTransitionError as error:
         return error_response(error.status_code, error.code, error.message)
     except PublishJobTransitionError as error:
+        return error_response(error.status_code, error.code, error.message)
+    except OperationTransitionError as error:
         return error_response(error.status_code, error.code, error.message)
     except AuthorizationError as error:
         return error_response(error.status_code, error.code, error.message)
@@ -119,7 +143,7 @@ def handle_request(event, repository=None, proposal_repository=None, monthly_rep
         return error_response(500, "INTERNAL_ERROR", "Internal server error")
 
 
-def _handle_request(event, repository, proposal_repository, monthly_repository=None, publish_jobs_repository=None, metrics_repository=None):
+def _handle_request(event, repository, proposal_repository, monthly_repository=None, publish_jobs_repository=None, metrics_repository=None, operations_repository=None, audit_repository=None):
     method = _event_method(event)
     path = _event_path(event)
 
@@ -139,6 +163,63 @@ def _handle_request(event, repository, proposal_repository, monthly_repository=N
         if not user:
             raise AdminRequestError(404, "USER_NOT_FOUND", "User was not found")
         return json_response(200, {"user": _public_admin_user(user)})
+
+    notice_id = _notice_id(path)
+    notice_action = _notice_action(path, notice_id)
+    policy_id = _policy_id(path)
+    policy_action = _policy_action(path, policy_id)
+
+    if method == "GET" and path == NOTICES_COLLECTION_PATH:
+        require_admin_access(event)
+        query = event.get("queryStringParameters") or {}
+        status = _validate_notice_status(query.get("status")) if query.get("status") else None
+        operations_repository = operations_repository or RdsDataAdminOperationsRepository.from_env()
+        notices = operations_repository.list_notices(status=status, limit=_parse_limit(query.get("limit")))
+        return json_response(200, {"items": [_public_notice(notice) for notice in notices], "nextCursor": None})
+
+    if method == "POST" and path == NOTICES_COLLECTION_PATH:
+        principal = require_admin_access(event)
+        payload = _validate_notice_payload(_json_body(event))
+        operations_repository = operations_repository or RdsDataAdminOperationsRepository.from_env()
+        notice = operations_repository.create_notice(principal, payload, _now_iso())
+        _record_audit(audit_repository, principal, "notice.create", "notice", notice.get("id"), _now_iso(), after={"status": notice.get("status")})
+        return json_response(201, {"notice": _public_notice(notice)})
+
+    if method == "POST" and notice_id and notice_action in NOTICE_ACTIONS:
+        principal = require_admin_access(event)
+        payload = _validate_empty_operation_payload(_json_body(event))
+        operations_repository = operations_repository or RdsDataAdminOperationsRepository.from_env()
+        notice = operations_repository.transition_notice(notice_id, notice_action, principal, _now_iso())
+        if not notice:
+            raise AdminRequestError(404, "NOTICE_NOT_FOUND", "Notice was not found")
+        _record_audit(audit_repository, principal, f"notice.{notice_action}", "notice", notice_id, _now_iso(), after={"status": notice.get("status")})
+        return json_response(200, {"notice": _public_notice(notice)})
+
+    if method == "GET" and path == POLICIES_COLLECTION_PATH:
+        require_admin_access(event)
+        query = event.get("queryStringParameters") or {}
+        status = _validate_policy_status(query.get("status")) if query.get("status") else None
+        operations_repository = operations_repository or RdsDataAdminOperationsRepository.from_env()
+        policies = operations_repository.list_policies(status=status, limit=_parse_limit(query.get("limit")))
+        return json_response(200, {"items": [_public_policy(policy) for policy in policies], "nextCursor": None})
+
+    if method == "POST" and path == POLICIES_COLLECTION_PATH:
+        principal = require_admin_access(event)
+        payload = _validate_policy_payload(_json_body(event))
+        operations_repository = operations_repository or RdsDataAdminOperationsRepository.from_env()
+        policy = operations_repository.create_policy(principal, payload, _now_iso())
+        _record_audit(audit_repository, principal, "recommendation_policy.create", "recommendation_policy", policy.get("id"), _now_iso(), after={"status": policy.get("status")})
+        return json_response(201, {"policy": _public_policy(policy)})
+
+    if method == "POST" and policy_id and policy_action in POLICY_ACTIONS:
+        principal = require_admin_access(event)
+        payload = _validate_empty_operation_payload(_json_body(event))
+        operations_repository = operations_repository or RdsDataAdminOperationsRepository.from_env()
+        policy = operations_repository.transition_policy(policy_id, policy_action, principal, _now_iso())
+        if not policy:
+            raise AdminRequestError(404, "POLICY_NOT_FOUND", "Recommendation policy was not found")
+        _record_audit(audit_repository, principal, f"recommendation_policy.{policy_action}", "recommendation_policy", policy_id, _now_iso(), after={"status": policy.get("status")})
+        return json_response(200, {"policy": _public_policy(policy)})
 
     if method == "POST" and path == PROPOSAL_COLLECTION_PATH:
         # Only data providers author proposals. Admins review but cannot create:
@@ -191,6 +272,7 @@ def _handle_request(event, repository, proposal_repository, monthly_repository=N
         )
         if not proposal:
             raise AdminRequestError(404, "PROPOSAL_NOT_FOUND", "Data proposal was not found")
+        _record_audit(audit_repository, principal, f"data_proposal.{proposal_action}", "data_proposal", proposal_id, _now_iso(), after={"status": proposal.get("status")})
         return json_response(200, {"proposal": _public_proposal(proposal, include_detail=True)})
 
     if method == "GET" and proposal_id and proposal_action == "history":
@@ -298,6 +380,7 @@ def _handle_request(event, repository, proposal_repository, monthly_repository=N
             publish_jobs_repository = publish_jobs_repository or RdsDataPublishJobRepository.from_env()
             jobs = publish_jobs_repository.enqueue_for_destination(monthly_id, principal, now)
             body["reflectionJobs"] = [_public_publish_job(job) for job in jobs]
+        _record_audit(audit_repository, principal, f"monthly_destination.{monthly_action}", "monthly_destination", monthly_id, now, after={"status": destination.get("status")}, metadata=({"reflectionJobCount": len(body.get("reflectionJobs", []))} if monthly_action == "publish" else None))
         return json_response(200, body)
 
     if method == "POST" and monthly_id and monthly_action == "events":
@@ -381,7 +464,23 @@ def _handle_request(event, repository, proposal_repository, monthly_repository=N
         )
         if not job:
             raise AdminRequestError(404, "PUBLISH_JOB_NOT_FOUND", "Publish job was not found")
+        _record_audit(audit_repository, principal, f"publish_job.{publish_job_action}", "publish_job", publish_job_id, _now_iso(), after={"status": job.get("status")})
         return json_response(200, {"job": _public_publish_job(job)})
+
+    if method == "GET" and path == AUDIT_LOGS_COLLECTION_PATH:
+        # Admin-only audit trail read. This is also the monitoring surface: every
+        # admin mutation is recorded here with actor + result.
+        require_admin_access(event)
+        audit_repository = audit_repository or RdsDataAuditLogRepository.from_env()
+        query = event.get("queryStringParameters") or {}
+        entries = audit_repository.list(
+            action=_optional_string(query.get("action")),
+            resource_type=_optional_string(query.get("resourceType")),
+            result=_optional_string(query.get("result")),
+            actor_user_id=_optional_string(query.get("actorUserId")),
+            limit=_parse_limit(query.get("limit")),
+        )
+        return json_response(200, {"items": [_public_audit_log(entry) for entry in entries], "nextCursor": None})
 
     return error_response(404, "NOT_FOUND", "Route not found")
 
@@ -692,6 +791,96 @@ def _validate_metric_date(value, field):
     return value.strip()
 
 
+def _validate_notice_payload(payload):
+    _reject_operation_forbidden_fields(payload, "INVALID_NOTICE_PAYLOAD")
+    allowed = {"title", "body", "audience", "severity", "startsAt", "endsAt"}
+    unexpected = sorted(set(payload.keys()) - allowed)
+    if unexpected:
+        raise AdminRequestError(400, "INVALID_NOTICE_PAYLOAD", "Notice payload contains unsupported fields")
+    if not _non_empty_string(payload.get("title")):
+        raise AdminRequestError(400, "INVALID_NOTICE_PAYLOAD", "title is required")
+    if not _non_empty_string(payload.get("body")):
+        raise AdminRequestError(400, "INVALID_NOTICE_PAYLOAD", "body is required")
+    audience = _optional_string(payload.get("audience")) or "all"
+    if audience not in {"all", "traveler", "local_operator", "data_provider", "admin"}:
+        raise AdminRequestError(400, "INVALID_NOTICE_PAYLOAD", "audience is invalid")
+    severity = _optional_string(payload.get("severity")) or "info"
+    if severity not in {"info", "warning", "critical"}:
+        raise AdminRequestError(400, "INVALID_NOTICE_PAYLOAD", "severity is invalid")
+    return {
+        "title": payload["title"].strip(),
+        "body": payload["body"].strip(),
+        "audience": audience,
+        "severity": severity,
+        "startsAt": _optional_string(payload.get("startsAt")),
+        "endsAt": _optional_string(payload.get("endsAt")),
+    }
+
+
+def _validate_policy_payload(payload):
+    _reject_operation_forbidden_fields(payload, "INVALID_POLICY_PAYLOAD")
+    allowed = {"policyKey", "title", "description", "rules", "priority", "effectiveFrom", "effectiveUntil"}
+    unexpected = sorted(set(payload.keys()) - allowed)
+    if unexpected:
+        raise AdminRequestError(400, "INVALID_POLICY_PAYLOAD", "Recommendation policy payload contains unsupported fields")
+    if not _non_empty_string(payload.get("policyKey")):
+        raise AdminRequestError(400, "INVALID_POLICY_PAYLOAD", "policyKey is required")
+    if not _non_empty_string(payload.get("title")):
+        raise AdminRequestError(400, "INVALID_POLICY_PAYLOAD", "title is required")
+    rules = payload.get("rules")
+    if rules is not None and not isinstance(rules, dict):
+        raise AdminRequestError(400, "INVALID_POLICY_PAYLOAD", "rules must be an object")
+    priority = _parse_operation_priority(payload.get("priority"))
+    return {
+        "policyKey": payload["policyKey"].strip(),
+        "title": payload["title"].strip(),
+        "description": _optional_string(payload.get("description")),
+        "rules": dict(rules or {}),
+        "priority": priority,
+        "effectiveFrom": _optional_string(payload.get("effectiveFrom")),
+        "effectiveUntil": _optional_string(payload.get("effectiveUntil")),
+    }
+
+
+def _validate_empty_operation_payload(payload):
+    _reject_operation_forbidden_fields(payload, "INVALID_OPERATION_PAYLOAD")
+    if payload:
+        raise AdminRequestError(400, "INVALID_OPERATION_PAYLOAD", "Action payload contains unsupported fields")
+    return {}
+
+
+def _reject_operation_forbidden_fields(payload, code):
+    forbidden = sorted(OPERATION_FORBIDDEN_FIELDS.intersection(payload.keys()))
+    if forbidden:
+        raise AdminRequestError(400, code, "Authority fields are not writable")
+
+
+def _validate_notice_status(value):
+    if value not in NOTICE_STATUSES:
+        raise AdminRequestError(400, "VALIDATION_ERROR", "notice status filter is invalid")
+    return value
+
+
+def _validate_policy_status(value):
+    if value not in POLICY_STATUSES:
+        raise AdminRequestError(400, "VALIDATION_ERROR", "policy status filter is invalid")
+    return value
+
+
+def _parse_operation_priority(value):
+    if value in (None, ""):
+        return 0
+    if isinstance(value, bool):
+        raise AdminRequestError(400, "INVALID_POLICY_PAYLOAD", "priority must be an integer")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise AdminRequestError(400, "INVALID_POLICY_PAYLOAD", "priority must be an integer")
+    if parsed < 0:
+        raise AdminRequestError(400, "INVALID_POLICY_PAYLOAD", "priority must be non-negative")
+    return min(parsed, 1000)
+
+
 def _parse_positive_int(value, field, default, max_value):
     parsed = _parse_non_negative_int(value, field, default, max_value)
     if parsed < 1:
@@ -711,6 +900,45 @@ def _parse_non_negative_int(value, field, default, max_value):
     if parsed < 0:
         raise AdminRequestError(400, "INVALID_METRICS_EVENT_PAYLOAD", f"{field} must be non-negative")
     return min(parsed, max_value)
+
+
+def _public_notice(notice):
+    return {
+        "id": notice.get("id"),
+        "title": notice.get("title"),
+        "body": notice.get("body"),
+        "audience": notice.get("audience"),
+        "severity": notice.get("severity"),
+        "status": notice.get("status"),
+        "startsAt": notice.get("startsAt"),
+        "endsAt": notice.get("endsAt"),
+        "createdBy": notice.get("createdBy"),
+        "publishedBy": notice.get("publishedBy"),
+        "publishedAt": notice.get("publishedAt"),
+        "archivedAt": notice.get("archivedAt"),
+        "createdAt": notice.get("createdAt"),
+        "updatedAt": notice.get("updatedAt"),
+    }
+
+
+def _public_policy(policy):
+    return {
+        "id": policy.get("id"),
+        "policyKey": policy.get("policyKey"),
+        "title": policy.get("title"),
+        "description": policy.get("description"),
+        "rules": policy.get("rules") or {},
+        "priority": policy.get("priority") or 0,
+        "status": policy.get("status"),
+        "effectiveFrom": policy.get("effectiveFrom"),
+        "effectiveUntil": policy.get("effectiveUntil"),
+        "createdBy": policy.get("createdBy"),
+        "activatedBy": policy.get("activatedBy"),
+        "activatedAt": policy.get("activatedAt"),
+        "archivedAt": policy.get("archivedAt"),
+        "createdAt": policy.get("createdAt"),
+        "updatedAt": policy.get("updatedAt"),
+    }
 
 
 def _public_publish_job(job):
@@ -745,6 +973,78 @@ def _publish_job_action(path, job_id):
     if not path.startswith(prefix):
         return None
     return path[len(prefix):].strip("/") or None
+
+
+def _notice_id(path):
+    prefix = f"{NOTICES_COLLECTION_PATH}/"
+    if path.startswith(prefix):
+        return path[len(prefix):].split("/", 1)[0] or None
+    return None
+
+
+def _notice_action(path, notice_id):
+    if not notice_id:
+        return None
+    prefix = f"{NOTICES_COLLECTION_PATH}/{notice_id}/"
+    if not path.startswith(prefix):
+        return None
+    return path[len(prefix):].strip("/") or None
+
+
+def _policy_id(path):
+    prefix = f"{POLICIES_COLLECTION_PATH}/"
+    if path.startswith(prefix):
+        return path[len(prefix):].split("/", 1)[0] or None
+    return None
+
+
+def _policy_action(path, policy_id):
+    if not policy_id:
+        return None
+    prefix = f"{POLICIES_COLLECTION_PATH}/{policy_id}/"
+    if not path.startswith(prefix):
+        return None
+    return path[len(prefix):].strip("/") or None
+
+
+def _record_audit(audit_repository, principal, action, resource_type, resource_id, now, result="succeeded", after=None, metadata=None):
+    # Best-effort audit write: a logging failure must never fail the business
+    # operation it records, so any error is swallowed (and logged).
+    try:
+        repository = audit_repository or RdsDataAuditLogRepository.from_env()
+        entry = build_audit_entry(
+            principal,
+            action,
+            resource_type,
+            resource_id,
+            now,
+            result=result,
+            after=after,
+            metadata=metadata,
+        )
+        repository.record(entry)
+    except RdsDataConfigurationError:
+        # Audit storage is not configured (e.g. local/dev or unit tests). Skip
+        # quietly: the business operation already succeeded.
+        LOGGER.debug("Audit storage not configured; skipping audit for %s", action)
+    except Exception:
+        LOGGER.exception("Failed to record admin audit log for action %s", action)
+
+
+def _public_audit_log(entry):
+    return {
+        "id": entry.get("id"),
+        "occurredAt": entry.get("occurredAt"),
+        "actorUserId": entry.get("actorUserId"),
+        "rolesSnapshot": entry.get("rolesSnapshot") or [],
+        "action": entry.get("action"),
+        "resourceType": entry.get("resourceType"),
+        "resourceId": entry.get("resourceId"),
+        "result": entry.get("result"),
+        "reasonCode": entry.get("reasonCode"),
+        "afterSummary": entry.get("afterSummary") or {},
+        "metadata": entry.get("metadata") or {},
+    }
 
 
 def _json_body(event):
