@@ -66,6 +66,42 @@ Operational notes:
 - When NAT is enabled, the RDS security group allows MySQL only from the NAT instance security group. RDS remains private and `PubliclyAccessible=false`.
 - Production public egress needs a separate HA design review, likely NAT Gateway or multi-AZ NAT routing.
 
+### NAT 인스턴스 비용 최적화 운영 가이드
+
+NAT 인스턴스(t4g.nano, `i-0c6dad9690abd0101`)는 개발자가 SSM port forwarding으로 private RDS에 접속할 때만 필요하다. Lambda 함수는 VPC Endpoint(Secrets Manager, DynamoDB Gateway, S3 Gateway)를 통해 모든 AWS 서비스에 접근하므로 NAT 인스턴스에 의존하지 않는다. NAT 인스턴스가 stopped 상태여도 Lambda의 정상 동작에는 영향이 없다.
+
+DB 작업 시에만 NAT 인스턴스를 시작하고, 작업 완료 후 즉시 중지하면 월 ~$3(t4g.nano running 비용)을 절감할 수 있다.
+
+#### NAT 인스턴스 시작 (DB 작업 전)
+
+```powershell
+# NAT 인스턴스 ID 조회
+$natInstanceId = aws ssm get-parameter --name /lovv/dev/network/nat_instance_id --query Parameter.Value --output text
+
+# NAT 인스턴스 시작
+aws ec2 start-instances --instance-ids $natInstanceId
+
+# running 상태 대기
+aws ec2 wait instance-running --instance-ids $natInstanceId
+```
+
+#### NAT 인스턴스 중지 (DB 작업 완료 후)
+
+```powershell
+# NAT 인스턴스 중지
+aws ec2 stop-instances --instance-ids $natInstanceId
+
+# stopped 상태 대기
+aws ec2 wait instance-stopped --instance-ids $natInstanceId
+```
+
+#### 운영 주의사항
+
+- NAT 인스턴스를 중지해도 VPC Lambda(Auth, Admin, SavedPlans, Preference)는 VPC Endpoint를 통해 Secrets Manager, DynamoDB, S3, SSM Parameter Store에 정상 접근한다.
+- CloudFormation `EnableNatInstance` 기본값은 `false`이다. 신규 배포 시 NAT 인스턴스는 생성되지 않는다.
+- NAT 인스턴스가 필요한 시나리오: SSM port forwarding을 통한 로컬 MySQL 클라이언트의 private RDS 접속.
+- 장시간 유휴 상태로 방치하지 않도록 작업 후 반드시 중지한다.
+
 ### RDS access through SSM port forwarding
 
 Use the NAT instance as an SSM-managed access host, not as a public MySQL endpoint.
