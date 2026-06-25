@@ -1,5 +1,5 @@
 """tests/test_image_resolver.py — image_resolver 단위 테스트"""
-import pytest
+import unittest
 
 from small_cities.image_resolver import _to_pascal_stem, load_image_map, resolve_image_url
 
@@ -8,7 +8,7 @@ from small_cities.image_resolver import _to_pascal_stem, load_image_map, resolve
 # _to_pascal_stem
 # --------------------------------------------------------------------------- #
 
-class TestToPascalStem:
+class TestToPascalStem(unittest.TestCase):
     def test_single_word(self):
         # 비안향교 → Bianhyanggyo
         assert _to_pascal_stem("비안향교") == "Bianhyanggyo"
@@ -57,7 +57,7 @@ SAMPLE_MAP = {
 }
 
 
-class TestResolveImageUrl:
+class TestResolveImageUrl(unittest.TestCase):
     def test_direct_stem_match(self):
         """제목만 PascalCase stem으로 매핑되는 케이스"""
         url = resolve_image_url("KR-Uiseong", "비안향교", CDN_BASE, SAMPLE_MAP)
@@ -115,7 +115,7 @@ class TestResolveImageUrl:
 # load_image_map
 # --------------------------------------------------------------------------- #
 
-class TestLoadImageMap:
+class TestLoadImageMap(unittest.TestCase):
     def test_returns_dict_with_expected_keys(self):
         result = load_image_map()
         assert isinstance(result, dict)
@@ -134,3 +134,7 @@ class TestLoadImageMap:
         if result["images"]:
             key = next(iter(result["images"]))
             assert "/" in key  # "KR-City/Stem" 형식
+
+
+if __name__ == "__main__":
+    unittest.main()

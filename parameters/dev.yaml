@@ -4,6 +4,10 @@
   ParameterValue: "lovv-data-pipeline-dev-925273580929"
 - ParameterKey: MapCityS3Prefix
   ParameterValue: "raw/KR/details/20260609/"
+- ParameterKey: ImageCdnBaseUrl
+  ParameterValue: "{{resolve:ssm:/lovv/dev/cloudfront/image_base_url}}"
+- ParameterKey: AgentCoreRuntimeArn
+  ParameterValue: "arn:aws:bedrock-agentcore:us-east-1:925273580929:runtime/myagent_MyAgent-FNVZimELXM"
 - ParameterKey: AuthTokenSigningSecretArn
   ParameterValue: "arn:aws:secretsmanager:us-east-1:925273580929:secret:lovv/dev/jwt-signing-secret-LufcUG"
 - ParameterKey: AuthTokenTtlSeconds

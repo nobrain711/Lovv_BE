@@ -33,31 +33,61 @@ def lambda_handler(event, context):
     """AWS Lambda 실행 진입점. RDS MySQL 테이블 컬럼 유무를 검사하고 자가 복구 마이그레이션을 1회 수행"""
     global _migration_attempted
     if not _migration_attempted:
-        _migration_attempted = True
-        try:
-            from shared.database import create_database_client
-            db = create_database_client()
-            # MySQL 8.0 버전에 맞춰 생년월일, 성별, 활성화 상태, 권한 등 필요한 컬럼 자동 주입
-            try:
-                db.execute("ALTER TABLE users ADD COLUMN birth_date DATE NULL AFTER avatar_url", include_result_metadata=False)
-            except Exception:
-                pass
-            try:
-                db.execute("ALTER TABLE users ADD COLUMN gender VARCHAR(10) NULL AFTER birth_date", include_result_metadata=False)
-            except Exception:
-                pass
-            try:
-                db.execute("ALTER TABLE users ADD COLUMN status VARCHAR(30) NOT NULL DEFAULT 'active' AFTER birth_date", include_result_metadata=False)
-            except Exception:
-                pass
-            try:
-                db.execute("ALTER TABLE users ADD COLUMN role VARCHAR(30) NOT NULL DEFAULT 'user' AFTER status", include_result_metadata=False)
-            except Exception:
-                pass
-        except Exception as e:
-            print("VPC Migration helper warning:", e)
+        _migration_attempted = _attempt_warm_start_schema_patch()
 
     return handle_request(event or {})
+
+
+def _attempt_warm_start_schema_patch():
+    try:
+        from shared.database import create_database_client
+
+        db = create_database_client()
+    except Exception as error:
+        LOGGER.warning(
+            Tag.DB,
+            "Auth warm-start schema patch skipped errorType=%s",
+            error.__class__.__name__,
+        )
+        return False
+
+    statements = (
+        "ALTER TABLE users ADD COLUMN birth_date DATE NULL AFTER avatar_url",
+        "ALTER TABLE users ADD COLUMN gender VARCHAR(10) NULL AFTER birth_date",
+        "ALTER TABLE users ADD COLUMN status VARCHAR(30) NOT NULL DEFAULT 'active' AFTER birth_date",
+        "ALTER TABLE users ADD COLUMN role VARCHAR(30) NOT NULL DEFAULT 'user' AFTER status",
+    )
+    completed = True
+    for statement in statements:
+        try:
+            db.execute(statement, include_result_metadata=False)
+        except Exception as error:
+            if _is_expected_schema_patch_error(error):
+                continue
+            completed = False
+            LOGGER.warning(
+                Tag.DB,
+                "Auth warm-start schema patch failed statement=%s errorType=%s",
+                _schema_patch_statement_name(statement),
+                error.__class__.__name__,
+            )
+    return completed
+
+
+def _is_expected_schema_patch_error(error):
+    message = str(error).lower()
+    expected_fragments = (
+        "duplicate column",
+        "already exists",
+        "duplicate column name",
+        "errno 1060",
+    )
+    return any(fragment in message for fragment in expected_fragments)
+
+
+def _schema_patch_statement_name(statement):
+    match = re.search(r"ADD COLUMN\s+([a-zA-Z0-9_]+)", statement)
+    return match.group(1) if match else "unknown"
 
 
 def handle_request(event, provider_verifier=None, user_repository=None, session_repository=None, preference_repository=None):

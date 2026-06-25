@@ -9,9 +9,8 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-import boto3
-
 from shared.http import error_response, json_response
+from shared.logger import Tag, get_logger
 
 
 # 지원하는 진입 채널 타입 (지도 마커, 일반 챗봇 대화, 홈 추천 피드)
@@ -20,6 +19,7 @@ ENTRY_TYPES = {"map_marker", "chat", "home_recommendation"}
 COUNTRIES = {"KR", "JP"}
 # 여행 기간 유형 정의 (당일치기, 1박2일 등)
 TRIP_TYPES = {"daytrip", "2d1n", "3d2n", "4d3n", "5d4n"}
+LOGGER = get_logger(__name__)
 
 
 class AgentCoreRequestError(Exception):
@@ -68,15 +68,24 @@ def _handle_request(event):
     if payload.get("mock") or os.environ.get("MOCK_RECOMMENDATION") == "true":
         return json_response(200, _mock_recommendation(payload), event=event)
 
-    # 3. AWS Bedrock Agent 런타임 호출 시도 및 장애 시 Mock Fallback 적용
+    # 3. AWS Bedrock Agent 런타임 호출 시도. 운영 호출 실패는 저장 가능한 mock으로 위장하지 않는다.
     try:
         return json_response(200, _invoke_bedrock_agent(payload), event=event)
     except Exception as error:
-        print(f"Bedrock AgentCore invocation failed: {str(error)}. Falling back to mock recommendation.")
-        mock_res = _mock_recommendation(payload)
-        mock_res["fallback"] = True
-        mock_res["error"] = str(error)
-        return json_response(200, mock_res, event=event)
+        LOGGER.error(
+            Tag.SYSTEM,
+            "AgentCore invocation failed entryType=%s country=%s tripType=%s errorType=%s",
+            payload.get("entryType"),
+            payload.get("country"),
+            payload.get("tripType"),
+            error.__class__.__name__,
+        )
+        return error_response(
+            502,
+            "AGENTCORE_UNAVAILABLE",
+            "Recommendation generation is temporarily unavailable",
+            event=event,
+        )
 
 
 _bedrock_client = None
@@ -86,16 +95,17 @@ def _get_bedrock_client():
     """boto3 Bedrock Agent 런타임 클라이언트 지연 로딩 싱글톤 구현 (us-east-1 리전 고정)"""
     global _bedrock_client
     if _bedrock_client is None:
+        import boto3
+
         _bedrock_client = boto3.client("bedrock-agentcore", region_name="us-east-1")
     return _bedrock_client
 
 
 def _invoke_bedrock_agent(payload):
     """Bedrock Agent에 정형화된 JSON 요청을 인코딩하여 전송하고, 실행 결과 스트림/출력을 수신하여 일정 응답으로 매핑"""
-    agent_arn = os.environ.get(
-        "BEDROCK_AGENT_ARN",
-        "arn:aws:bedrock-agentcore:us-east-1:925273580929:runtime/myagent_MyAgent-FNVZimELXM",
-    )
+    agent_arn = os.environ.get("BEDROCK_AGENT_ARN")
+    if not agent_arn:
+        raise ValueError("AgentCore runtime ARN is not configured")
 
     # 1. 챗봇 대화의 영속성 관리를 위한 세션 식별자 확인 또는 자동 생성
     session_id = payload.get("sessionId")
@@ -125,7 +135,15 @@ def _invoke_bedrock_agent(payload):
     }
 
     wrapped_payload = {"request": structured_payload}
-    print(f"[AgentCore] sending payload: {json.dumps(wrapped_payload, ensure_ascii=False)}")
+    LOGGER.info(
+        Tag.SYSTEM,
+        "Invoking AgentCore runtime entryType=%s country=%s tripType=%s themeCount=%s hasLocation=%s",
+        structured_payload["entryType"],
+        structured_payload["country"],
+        structured_payload["tripType"],
+        len(structured_payload["themes"]),
+        bool(structured_payload["userLocation"]),
+    )
 
     # 3. UTF-8 바이트로 인코딩하여 Bedrock API 전송
     bedrock_payload = json.dumps(wrapped_payload).encode("utf-8")
@@ -137,7 +155,7 @@ def _invoke_bedrock_agent(payload):
         payload=bedrock_payload,
     )
 
-    print(f"[AgentCore] response keys: {list(response.keys())}")
+    LOGGER.info(Tag.SYSTEM, "AgentCore runtime returned keys=%s", sorted(response.keys()))
 
     # 4. Bedrock 런타임의 반환 객체(응답 바디, 스트림 등)를 순차적으로 역직렬화 시도
     raw_body = None
@@ -149,14 +167,11 @@ def _invoke_bedrock_agent(payload):
             elif isinstance(candidate, (str, bytes)):
                 raw_body = candidate if isinstance(candidate, bytes) else candidate.encode("utf-8")
             if raw_body:
-                print(f"[AgentCore] read from key='{key}', length={len(raw_body)}")
+                LOGGER.info(Tag.SYSTEM, "AgentCore runtime body read key=%s byteLength=%s", key, len(raw_body))
                 break
 
     if raw_body is None:
-        print(f"[AgentCore] no readable body found in response: {response}")
         raise ValueError("AgentCore response has no readable body")
-
-    print(f"[AgentCore] raw response (first 500 chars): {raw_body[:500]}")
 
     try:
         response_data = json.loads(raw_body)
@@ -164,7 +179,12 @@ def _invoke_bedrock_agent(payload):
         # JSON 포맷이 아닌 경우 일반 텍스트 포맷으로 매핑
         response_data = {"text": raw_body.decode("utf-8") if isinstance(raw_body, bytes) else raw_body}
 
-    print(f"[AgentCore] parsed response type={type(response_data).__name__}, keys={list(response_data.keys()) if isinstance(response_data, dict) else 'N/A'}")
+    LOGGER.info(
+        Tag.SYSTEM,
+        "AgentCore runtime response parsed type=%s keys=%s",
+        type(response_data).__name__,
+        sorted(response_data.keys()) if isinstance(response_data, dict) else [],
+    )
 
     # 5. 응답 본문 내 결과(result) 노드 추출
     result = response_data.get("result", response_data) if isinstance(response_data, dict) else response_data
@@ -173,7 +193,12 @@ def _invoke_bedrock_agent(payload):
     destination = result.get("destination") if isinstance(result, dict) else None
     explainability = result.get("explainability") if isinstance(result, dict) else None
 
-    print(f"[AgentCore] itinerary={itinerary}, days_count={len(itinerary.get('days', [])) if isinstance(itinerary, dict) else 'N/A'}")
+    LOGGER.info(
+        Tag.SYSTEM,
+        "AgentCore itinerary mapped hasDestination=%s dayCount=%s",
+        bool(destination),
+        len(itinerary.get("days", [])) if isinstance(itinerary, dict) else 0,
+    )
 
     res = _mock_recommendation(payload)
     res["mock"] = False
